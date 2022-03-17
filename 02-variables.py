@@ -3,5 +3,5 @@
 # print(a)
 # print(b)
 
-c="Hello there"
+c = "Hello there"
 print(c)
