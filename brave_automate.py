@@ -11,3 +11,5 @@ webbrowser.get("brave").open(url[1])
 webbrowser.get("brave").open(url[2])
 webbrowser.get("brave").open(url[3])
 webbrowser.get("brave").open(url[4])
+
+
