@@ -1,4 +1,4 @@
-c = 3
+c = 5
 d = 4
 if c < d:
     print("c is less than d")
