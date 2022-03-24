@@ -1,0 +1,5 @@
+print(4 % 3)
+print(5 % 2)
+print(1 % 2)
+print(6 % 3)
+print(5 % 3)
