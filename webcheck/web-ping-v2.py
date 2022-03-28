@@ -17,7 +17,8 @@ def pingwebsite(host):
 
 for line in Line:
     count += 1
+    web = format(line.strip())
 
-    response = pingwebsite(format(line.strip()))
+    response = pingwebsite("http://" + web + "/")
     print(response)
-    print(format(line.strip()))
+    # print("http://" + web + "/")
