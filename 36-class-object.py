@@ -1,6 +1,3 @@
-import self as self
-
-
 class Robot:
     def __init__(self, name, color, weight):
         self.name = name
