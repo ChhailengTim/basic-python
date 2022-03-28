@@ -28,12 +28,14 @@ def pingwebsite(host):
     response = ping(host)
 
     if response == False:
-        return "មិនដំណើរការ"
+        return False
     else:
-        return "ដំណើរការ"
+        return True
 
 
 for line in Lines:
     count += 1
     print(count)
-    print(pingwebsite("{}".format(line.strip())))
+    response = pingwebsite("{}".format(line.strip()))
+    #print(pingwebsite("{}".format(line.strip())))
+    print(response)
