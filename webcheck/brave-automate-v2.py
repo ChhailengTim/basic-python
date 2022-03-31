@@ -1,6 +1,6 @@
 import webbrowser
 
-file = open('websites-3.txt', 'r')
+file = open('websites.txt', 'r')
 Line = file.readlines()
 
 count = 0
@@ -19,6 +19,6 @@ webbrowser.register("brave", None, webbrowser.BackgroundBrowser(brave_path))
 for line in Line:
     count += 1
     web = format(line.strip())
-    # webbrowser.get("brave").open(web)
+    webbrowser.get("brave").open(web)
     # webbrowser.get("brave").open("http://" + web + "/")
-    webbrowser.get("brave").open("https://"+web+"/")
+    # webbrowser.get("brave").open("https://"+web+"/")
