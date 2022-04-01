@@ -1,6 +1,6 @@
 import webbrowser
 
-file = open('websites.txt', 'r')
+file = open('websites-3.txt', 'r')
 Line = file.readlines()
 
 count = 0

@@ -15,7 +15,7 @@ wks = sh.worksheet("Sheet1")
 # print(wks.get_all_records())
 
 
-file = open('websites.txt', 'r')
+file = open('websites-3.txt', 'r')
 Lines = file.readlines()
 
 count = 0
@@ -34,8 +34,9 @@ def pingwebsite(host):
 
 
 for line in Lines:
+    web = format(line.strip())
     count += 1
     print(count)
-    response = pingwebsite("{}".format(line.strip()))
-    #print(pingwebsite("{}".format(line.strip())))
+    response = pingwebsite(web)
+    # print(pingwebsite("{}".format(line.strip())))
     print(response)
