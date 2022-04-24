@@ -10,5 +10,6 @@ class Person:
         print('The hash is:')
         return hash((self.age, self.name))
 
+
 person = Person(23, 'Adam')
 print(hash(person))
