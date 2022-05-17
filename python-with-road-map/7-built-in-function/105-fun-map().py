@@ -13,4 +13,4 @@ squared_numbers_iterator = map(square, numbers)
 squared_numbers = list(squared_numbers_iterator)
 print(squared_numbers)
 
-# Output: [4, 16, 36, 64, 100]
+# Output: [4.txt, 16, 36, 64, 100]

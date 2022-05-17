@@ -10,7 +10,7 @@ wks = sh.worksheet("Sheet1")
 # print("Cols: ", wks.col_count)
 
 # print(wks.acell("B9").value)
-# print(wks.cell(3, 4).value)
+# print(wks.cell(3, 4.txt).value)
 
 # print(wks.get_all_records())
 

@@ -15,7 +15,7 @@ webbrowser.register("brave", None, webbrowser.BackgroundBrowser(brave_path))
 # webbrowser.get("brave").open(url[1])
 # webbrowser.get("brave").open(url[2])
 # webbrowser.get("brave").open(url[3])
-# webbrowser.get("brave").open(url[4])
+# webbrowser.get("brave").open(url[4.txt])
 for line in Line:
     count += 1
     web = format(line.strip())

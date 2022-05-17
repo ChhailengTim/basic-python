@@ -32,7 +32,7 @@ InstanceOfFoo = Foo()
 InstanceOfFoo()
 
 
-# Example 4
+# Example 4.txt
 class Foo:
     def printLine(self):
         print('Print Something')

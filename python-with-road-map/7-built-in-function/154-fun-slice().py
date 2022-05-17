@@ -4,4 +4,4 @@ py_string = 'Python'
 print(py_string[0:3])  # Pyt
 
 # contains indices 1 and 3
-print(py_string[1:5:2]) # yh
+print(py_string[1:5:2])  # yh
