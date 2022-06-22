@@ -1,0 +1,6 @@
+tuple1 = (1, 2, "college")
+tuple2 = ()
+tuple3 = tuple((1, 3, 5, 6, "hello"))
+print(tuple1)
+print(tuple2)
+print(tuple3)
