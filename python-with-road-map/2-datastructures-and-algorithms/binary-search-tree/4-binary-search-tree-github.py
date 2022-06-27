@@ -52,6 +52,3 @@ class Tree:
     #   # Useful for printing
     def to_s(self):
         return f"{self.inorder()}"
-
-
-
