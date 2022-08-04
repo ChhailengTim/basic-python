@@ -69,14 +69,14 @@ def menu():
     print("\n2. Data lists")
     print("\n3. Update data")
     print("\n4. Delete data")
-    enter = int(input("Enter number you want to proceed: "))
-    if enter == 1:
+    enter = input("Enter number you want to proceed: ")
+    if enter == '1':
         add_infor()
-    elif enter == 2:
+    elif enter == '2':
         List()
-    elif enter == 3:
+    elif enter == '3':
         edit()
-    elif enter == 4:
+    elif enter == '4':
         delete()
 
 
