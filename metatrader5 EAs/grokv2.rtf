@@ -1,0 +1,248 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 //+------------------------------------------------------------------+\
+//|                                             GoldScalper_Enhanced.mq5 |\
+//|                        Enhanced EA for XAU/USD (Gold) with Martingale-like adding |\
+//|                        Uses MA + RSI + MACD + ADX for signal confirmation |\
+//+------------------------------------------------------------------+\
+#property strict\
+#property version   "2.00"\
+\
+#include <Trade\\Trade.mqh>\
+\
+input double LotSize              = 0.01;      // Base lot size\
+input double StopLossUSD          = 1.50;      // USD stop loss per base lot (scales with lot)\
+input double TakeProfitUSD        = 1.00;      // USD take profit per base lot (scales with lot)\
+input int    MAPeriod             = 20;        // MA period\
+input int    RSIPeriod            = 14;        // RSI period\
+input int    MACDFast             = 12;        // MACD fast EMA\
+input int    MACDSlow             = 26;        // MACD slow EMA\
+input int    MACDSignal           = 9;         // MACD signal SMA\
+input int    ADXPeriod            = 14;        // ADX period for trend strength\
+input double AddDistancePoints    = 100.0;     // Distance in points to add new position (against direction)\
+input double LotMultiplier        = 2.0;       // Lot multiplier for subsequent positions\
+input int    MaxLevels            = 5;         // Maximum number of adding levels (positions in one direction)\
+\
+CTrade trade;\
+int    handle_ma   = INVALID_HANDLE;\
+int    handle_rsi  = INVALID_HANDLE;\
+int    handle_macd = INVALID_HANDLE;\
+int    handle_adx  = INVALID_HANDLE;\
+datetime lastM5BarTime = 0;\
+\
+//+------------------------------------------------------------------+\
+//| Expert initialization function                                   |\
+//+------------------------------------------------------------------+\
+int OnInit()\
+\{\
+    trade.SetExpertMagicNumber(1001);\
+    trade.SetDeviationInPoints(100); // Allow slippage for Gold\
+\
+    handle_ma = iMA("XAUUSD", PERIOD_M5, MAPeriod, 0, MODE_SMA, PRICE_CLOSE);\
+    if(handle_ma == INVALID_HANDLE)\
+    \{\
+        Print("Failed to create MA handle");\
+        return INIT_FAILED;\
+    \}\
+\
+    handle_rsi = iRSI("XAUUSD", PERIOD_M5, RSIPeriod, PRICE_CLOSE);\
+    if(handle_rsi == INVALID_HANDLE)\
+    \{\
+        Print("Failed to create RSI handle");\
+        return INIT_FAILED;\
+    \}\
+\
+    handle_macd = iMACD("XAUUSD", PERIOD_M5, MACDFast, MACDSlow, MACDSignal, PRICE_CLOSE);\
+    if(handle_macd == INVALID_HANDLE)\
+    \{\
+        Print("Failed to create MACD handle");\
+        return INIT_FAILED;\
+    \}\
+\
+    handle_adx = iADX("XAUUSD", PERIOD_M5, ADXPeriod);\
+    if(handle_adx == INVALID_HANDLE)\
+    \{\
+        Print("Failed to create ADX handle");\
+        return INIT_FAILED;\
+    \}\
+\
+    return INIT_SUCCEEDED;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert deinitialization function                                 |\
+//+------------------------------------------------------------------+\
+void OnDeinit(const int reason)\
+\{\
+    if(handle_ma != INVALID_HANDLE) IndicatorRelease(handle_ma);\
+    if(handle_rsi != INVALID_HANDLE) IndicatorRelease(handle_rsi);\
+    if(handle_macd != INVALID_HANDLE) IndicatorRelease(handle_macd);\
+    if(handle_adx != INVALID_HANDLE) IndicatorRelease(handle_adx);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get number of open positions in a direction                      |\
+//+------------------------------------------------------------------+\
+int GetOpenCount(bool isBuy)\
+\{\
+    int count = 0;\
+    for(int i = PositionsTotal() - 1; i >= 0; i--)\
+    \{\
+        if(PositionGetSymbol(i) == _Symbol)\
+        \{\
+            if((isBuy && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ||\
+               (!isBuy && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL))\
+            \{\
+                count++;\
+            \}\
+        \}\
+    \}\
+    return count;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get average entry price for positions in a direction             |\
+//+------------------------------------------------------------------+\
+double GetAveragePrice(bool isBuy)\
+\{\
+    double total_lots = 0.0;\
+    double total_price_lots = 0.0;\
+    for(int i = PositionsTotal() - 1; i >= 0; i--)\
+    \{\
+        if(PositionGetSymbol(i) == _Symbol)\
+        \{\
+            if((isBuy && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ||\
+               (!isBuy && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL))\
+            \{\
+                double lots = PositionGetDouble(POSITION_VOLUME);\
+                double open_price = PositionGetDouble(POSITION_PRICE_OPEN);\
+                total_lots += lots;\
+                total_price_lots += open_price * lots;\
+            \}\
+        \}\
+    \}\
+    if(total_lots > 0.0) return total_price_lots / total_lots;\
+    return 0.0;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert tick function                                             |\
+//+------------------------------------------------------------------+\
+void OnTick()\
+\{\
+    // Only trade XAUUSD\
+    if(_Symbol != "XAUUSD")\
+        return;\
+\
+    // Wait for enough bars\
+    int required_bars = MathMax(MAPeriod, MathMax(RSIPeriod, MathMax(MACDSlow, ADXPeriod))) + 10;\
+    if(Bars("XAUUSD", PERIOD_M5) < required_bars)\
+        return;\
+\
+    datetime currentM5Bar = iTime("XAUUSD", PERIOD_M5, 0);\
+    if(currentM5Bar == 0 || currentM5Bar == lastM5BarTime)\
+        return;\
+\
+    // Get last 2 CLOSED M5 bars: index 1 (most recent closed), index 2 (previous)\
+    double ma_buffer[2], close_buffer[2], rsi_buffer[2];\
+    double macd_main[2], macd_signal[2], adx_buffer[1];\
+    \
+    if(CopyBuffer(handle_ma, 0, 1, 2, ma_buffer) != 2)\
+        return;\
+    if(CopyClose("XAUUSD", PERIOD_M5, 1, 2, close_buffer) != 2)\
+        return;\
+    if(CopyBuffer(handle_rsi, 0, 1, 2, rsi_buffer) != 2)\
+        return;\
+    if(CopyBuffer(handle_macd, 0, 1, 2, macd_main) != 2)\
+        return;\
+    if(CopyBuffer(handle_macd, 1, 1, 2, macd_signal) != 2)\
+        return;\
+    if(CopyBuffer(handle_adx, 0, 1, 1, adx_buffer) != 1)\
+        return;\
+\
+    // MA Crossover on closed bars: [0] = bar1 (new), [1] = bar2 (old)\
+    bool maBuyCross   = (close_buffer[1] <= ma_buffer[1]) && (close_buffer[0] > ma_buffer[0]);\
+    bool maSellCross  = (close_buffer[1] >= ma_buffer[1]) && (close_buffer[0] < ma_buffer[0]);\
+\
+    // RSI confirmation on last closed bar [0]\
+    bool rsiBuyConfirm = rsi_buffer[0] > 50.0;\
+    bool rsiSellConfirm = rsi_buffer[0] < 50.0;\
+\
+    // MACD crossover on closed bars\
+    bool macdBuyCross = (macd_main[1] <= macd_signal[1]) && (macd_main[0] > macd_signal[0]);\
+    bool macdSellCross = (macd_main[1] >= macd_signal[1]) && (macd_main[0] < macd_signal[0]);\
+\
+    // ADX trend strength on last closed bar\
+    bool trendStrong = adx_buffer[0] > 25.0;\
+\
+    bool buySignal  = maBuyCross && rsiBuyConfirm && macdBuyCross && trendStrong;\
+    bool sellSignal = maSellCross && rsiSellConfirm && macdSellCross && trendStrong;\
+\
+    // Calculate proper SL/TP distances in price units\
+    double tick_value = SymbolInfoDouble("XAUUSD", SYMBOL_TRADE_TICK_VALUE);\
+    double tick_size = SymbolInfoDouble("XAUUSD", SYMBOL_TRADE_TICK_SIZE);\
+    if(tick_size == 0.0) tick_size = SymbolInfoDouble("XAUUSD", SYMBOL_POINT);\
+    double point_value = tick_value / tick_size;  // Value per price unit per lot\
+\
+    int digits = (int)SymbolInfoInteger("XAUUSD", SYMBOL_DIGITS);\
+\
+    double ask = SymbolInfoDouble("XAUUSD", SYMBOL_ASK);\
+    double bid = SymbolInfoDouble("XAUUSD", SYMBOL_BID);\
+\
+    // Handle buy signal\
+    if(buySignal)\
+    \{\
+        int open_count = GetOpenCount(true);\
+        if(open_count < MaxLevels)\
+        \{\
+            double avg_price = GetAveragePrice(true);\
+            bool should_add = (open_count == 0) || (ask < avg_price - AddDistancePoints * _Point);\
+            if(should_add)\
+            \{\
+                double new_lot = LotSize * MathPow(LotMultiplier, open_count);\
+                double sl_usd_new = StopLossUSD * (new_lot / LotSize);   // Scale USD SL with lot\
+                double tp_usd_new = TakeProfitUSD * (new_lot / LotSize); // Scale USD TP with lot\
+                double sl_distance = (sl_usd_new > 0) ? sl_usd_new / (new_lot * point_value) : 0.0;\
+                double tp_distance = (tp_usd_new > 0) ? tp_usd_new / (new_lot * point_value) : 0.0;\
+\
+                double sl = 0.0, tp = 0.0;\
+                if(sl_usd_new > 0) sl = NormalizeDouble(ask - sl_distance, digits);\
+                if(tp_usd_new > 0) tp = NormalizeDouble(ask + tp_distance, digits);\
+\
+                if(trade.Buy(new_lot, "XAUUSD", ask, sl, tp, "Gold Buy (Enhanced)"))\
+                    lastM5BarTime = currentM5Bar;\
+            \}\
+        \}\
+    \}\
+\
+    // Handle sell signal\
+    if(sellSignal)\
+    \{\
+        int open_count = GetOpenCount(false);\
+        if(open_count < MaxLevels)\
+        \{\
+            double avg_price = GetAveragePrice(false);\
+            bool should_add = (open_count == 0) || (bid > avg_price + AddDistancePoints * _Point);\
+            if(should_add)\
+            \{\
+                double new_lot = LotSize * MathPow(LotMultiplier, open_count);\
+                double sl_usd_new = StopLossUSD * (new_lot / LotSize);   // Scale USD SL with lot\
+                double tp_usd_new = TakeProfitUSD * (new_lot / LotSize); // Scale USD TP with lot\
+                double sl_distance = (sl_usd_new > 0) ? sl_usd_new / (new_lot * point_value) : 0.0;\
+                double tp_distance = (tp_usd_new > 0) ? tp_usd_new / (new_lot * point_value) : 0.0;\
+\
+                double sl = 0.0, tp = 0.0;\
+                if(sl_usd_new > 0) sl = NormalizeDouble(bid + sl_distance, digits);\
+                if(tp_usd_new > 0) tp = NormalizeDouble(bid - tp_distance, digits);\
+\
+                if(trade.Sell(new_lot, "XAUUSD", bid, sl, tp, "Gold Sell (Enhanced)"))\
+                    lastM5BarTime = currentM5Bar;\
+            \}\
+        \}\
+    \}\
+\}}

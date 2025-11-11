@@ -1,0 +1,650 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 //+------------------------------------------------------------------+\
+//|                                          GoldScalper_Ultimate.mq5|\
+//|                 Ultimate Gold EA with Smart Profit Management    |\
+//+------------------------------------------------------------------+\
+#property strict\
+#property version   "4.00"\
+\
+#include <Trade\\Trade.mqh>\
+#include <Trade\\PositionInfo.mqh>\
+#include <Trade\\OrderInfo.mqh>\
+#include <Trade\\HistoryOrderInfo.mqh>\
+#include <Trade\\DealInfo.mqh>\
+\
+//--- Input Parameters\
+input double InitialLotSize     = 0.01;      // Base lot size\
+input double RiskPercent        = 1.0;       // Risk per trade in % of account\
+input bool   UseDynamicSLTP     = true;      // Use ATR-based dynamic SL/TP\
+input double ATR_SL_Multiplier  = 2.0;       // Increased SL multiplier\
+input double ATR_TP_Multiplier  = 3.0;       // Increased TP multiplier for better R:R\
+\
+//--- Martingale Settings\
+input bool   UseMartingale      = true;      // Enable martingale recovery\
+input double MartingaleMultiplier = 1.5;     // Reduced multiplier for safety\
+input double AddDistancePoints  = 200.0;     // Increased distance for adding\
+input int    MaxLevels          = 2;         // Reduced maximum levels\
+input int    MaxConsecutiveLoss = 2;         // Max losses before reset\
+\
+//--- Technical Indicators\
+input int    FastMAPeriod       = 5;         // Faster MA for entries\
+input int    SlowMAPeriod       = 20;        // Slower MA for trend\
+input int    RSIPeriod          = 14;\
+input int    MACDFast           = 12;\
+input int    MACDSlow           = 26;\
+input int    MACDSignal         = 9;\
+input int    ADXPeriod          = 14;\
+input int    ATRPeriod          = 14;\
+\
+//--- Profit Management\
+input bool   UsePartialProfit   = true;      // Take partial profits\
+input double PartialProfit1     = 1.5;       // Take 50% at this profit (USD)\
+input double PartialProfit2     = 3.0;       // Take another 30% at this profit\
+input bool   UseBreakevenStop   = true;      // Move SL to breakeven\
+input double BreakevenTrigger   = 1.0;       // Trigger breakeven at this profit\
+\
+//--- Filter Settings\
+input bool   UseTimeFilter      = true;\
+input bool   UseTrendFilter     = true;      // Only trade with trend\
+input bool   UseVolumeFilter    = true;      // Filter low volume periods\
+\
+CTrade trade;\
+CPositionInfo positionInfo;\
+COrderInfo orderInfo;\
+CHistoryOrderInfo historyOrder;\
+CDealInfo dealInfo;\
+\
+int consecutiveLosses = 0;\
+double currentLotSize = InitialLotSize;\
+datetime lastM5BarTime = 0;\
+double lastProfit = 0;\
+\
+//--- Indicator Handles\
+int handle_fast_ma, handle_slow_ma, handle_rsi, handle_macd, handle_adx, handle_atr;\
+\
+//+------------------------------------------------------------------+\
+//| Expert initialization function                                   |\
+//+------------------------------------------------------------------+\
+int OnInit()\
+\{\
+    trade.SetExpertMagicNumber(1003);\
+    trade.SetDeviationInPoints(100);\
+    \
+    // Initialize indicators\
+    handle_fast_ma = iMA(_Symbol, PERIOD_M5, FastMAPeriod, 0, MODE_EMA, PRICE_CLOSE);\
+    handle_slow_ma = iMA(_Symbol, PERIOD_M5, SlowMAPeriod, 0, MODE_SMA, PRICE_CLOSE);\
+    handle_rsi = iRSI(_Symbol, PERIOD_M5, RSIPeriod, PRICE_CLOSE);\
+    handle_macd = iMACD(_Symbol, PERIOD_M5, MACDFast, MACDSlow, MACDSignal, PRICE_CLOSE);\
+    handle_adx = iADX(_Symbol, PERIOD_M5, ADXPeriod);\
+    handle_atr = iATR(_Symbol, PERIOD_M5, ATRPeriod);\
+    \
+    if(handle_fast_ma == INVALID_HANDLE || handle_slow_ma == INVALID_HANDLE)\
+    \{\
+        Print("Failed to create indicator handles");\
+        return INIT_FAILED;\
+    \}\
+    \
+    currentLotSize = InitialLotSize;\
+    return INIT_SUCCEEDED;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert deinitialization function                                 |\
+//+------------------------------------------------------------------+\
+void OnDeinit(const int reason)\
+\{\
+    if(handle_fast_ma != INVALID_HANDLE) IndicatorRelease(handle_fast_ma);\
+    if(handle_slow_ma != INVALID_HANDLE) IndicatorRelease(handle_slow_ma);\
+    if(handle_rsi != INVALID_HANDLE) IndicatorRelease(handle_rsi);\
+    if(handle_macd != INVALID_HANDLE) IndicatorRelease(handle_macd);\
+    if(handle_adx != INVALID_HANDLE) IndicatorRelease(handle_adx);\
+    if(handle_atr != INVALID_HANDLE) IndicatorRelease(handle_atr);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get number of open positions in a direction                      |\
+//+------------------------------------------------------------------+\
+int GetOpenCount(bool isBuy)\
+\{\
+    int count = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1003)\
+            \{\
+                if((isBuy && positionInfo.PositionType() == POSITION_TYPE_BUY) ||\
+                   (!isBuy && positionInfo.PositionType() == POSITION_TYPE_SELL))\
+                \{\
+                    count++;\
+                \}\
+            \}\
+        \}\
+    \}\
+    return count;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get total position volume in a direction                         |\
+//+------------------------------------------------------------------+\
+double GetTotalVolume(bool isBuy)\
+\{\
+    double totalVolume = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1003)\
+            \{\
+                ENUM_POSITION_TYPE posType = positionInfo.PositionType();\
+                if((isBuy && posType == POSITION_TYPE_BUY) ||\
+                   (!isBuy && posType == POSITION_TYPE_SELL))\
+                \{\
+                    totalVolume += positionInfo.Volume();\
+                \}\
+            \}\
+        \}\
+    \}\
+    return totalVolume;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get average entry price for positions in a direction             |\
+//+------------------------------------------------------------------+\
+double GetAveragePrice(bool isBuy)\
+\{\
+    double total_lots = 0.0;\
+    double total_price_lots = 0.0;\
+    \
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1003)\
+            \{\
+                ENUM_POSITION_TYPE posType = positionInfo.PositionType();\
+                if((isBuy && posType == POSITION_TYPE_BUY) ||\
+                   (!isBuy && posType == POSITION_TYPE_SELL))\
+                \{\
+                    double lots = positionInfo.Volume();\
+                    double open_price = positionInfo.PriceOpen();\
+                    total_lots += lots;\
+                    total_price_lots += open_price * lots;\
+                \}\
+            \}\
+        \}\
+    \}\
+    \
+    if(total_lots > 0.0) \
+        return total_price_lots / total_lots;\
+    return 0.0;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check if trading is allowed by time filter                       |\
+//+------------------------------------------------------------------+\
+bool IsTradingTime()\
+\{\
+    if(!UseTimeFilter) \
+        return true;\
+    \
+    MqlDateTime now_struct;\
+    TimeCurrent(now_struct);\
+    int hour = now_struct.hour;\
+    \
+    // Avoid trading during low liquidity periods\
+    if(hour >= 21 || hour < 2) \
+        return false;\
+    \
+    return true;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check trend strength using higher timeframe                      |\
+//+------------------------------------------------------------------+\
+bool IsTrendStrong(bool isBuy)\
+\{\
+    if(!UseTrendFilter) return true;\
+    \
+    double ma_h1_fast[1], ma_h1_slow[1];\
+    \
+    int h1_fast_ma = iMA(_Symbol, PERIOD_H1, FastMAPeriod, 0, MODE_EMA, PRICE_CLOSE);\
+    int h1_slow_ma = iMA(_Symbol, PERIOD_H1, SlowMAPeriod, 0, MODE_SMA, PRICE_CLOSE);\
+    \
+    if(CopyBuffer(h1_fast_ma, 0, 0, 1, ma_h1_fast) == 1 &&\
+       CopyBuffer(h1_slow_ma, 0, 0, 1, ma_h1_slow) == 1)\
+    \{\
+        if(isBuy)\
+            return (ma_h1_fast[0] > ma_h1_slow[0]);\
+        else\
+            return (ma_h1_fast[0] < ma_h1_slow[0]);\
+    \}\
+    \
+    IndicatorRelease(h1_fast_ma);\
+    IndicatorRelease(h1_slow_ma);\
+    \
+    return true; // If we can't get data, allow trading\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Calculate position size with proper risk management              |\
+//+------------------------------------------------------------------+\
+double CalculateLotSize(int level = 0)\
+\{\
+    double lotSize = InitialLotSize;\
+    \
+    // Martingale calculation\
+    if(UseMartingale && consecutiveLosses > 0 && level > 0)\
+    \{\
+        lotSize = NormalizeDouble(InitialLotSize * MathPow(MartingaleMultiplier, consecutiveLosses), 2);\
+    \}\
+    else\
+    \{\
+        // Risk-based calculation\
+        double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);\
+        double riskAmount = accountBalance * RiskPercent / 100.0;\
+        \
+        // Use ATR for risk calculation\
+        double atr_buffer[1];\
+        if(CopyBuffer(handle_atr, 0, 1, 1, atr_buffer) == 1)\
+        \{\
+            double atr_value = atr_buffer[0];\
+            double riskDistance = atr_value * ATR_SL_Multiplier;\
+            \
+            double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);\
+            double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);\
+            if(tick_size == 0.0) \
+                tick_size = SymbolInfoDouble(_Symbol, SYMBOL_POINT);\
+            \
+            double point_value = tick_value / tick_size;\
+            double riskPerLot = riskDistance * point_value * InitialLotSize;\
+            \
+            if(riskPerLot > 0)\
+            \{\
+                lotSize = riskAmount / riskPerLot * InitialLotSize;\
+            \}\
+        \}\
+    \}\
+    \
+    // Validate lot size\
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);\
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);\
+    double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);\
+    \
+    lotSize = MathMax(minLot, MathMin(maxLot, lotSize));\
+    lotSize = NormalizeDouble(lotSize / stepLot, 0) * stepLot;\
+    \
+    // Margin check\
+    double margin = 0.0;\
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);\
+    if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lotSize, ask, margin))\
+    \{\
+        double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);\
+        if(margin > freeMargin * 0.2) // Reduced to 20% for safety\
+        \{\
+            return InitialLotSize;\
+        \}\
+    \}\
+    \
+    return lotSize;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Calculate SL and TP with dynamic ATR                             |\
+//+------------------------------------------------------------------+\
+void CalculateSLTP(bool isBuy, double &sl, double &tp, double lotSize)\
+\{\
+    double current_price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) \
+                                : SymbolInfoDouble(_Symbol, SYMBOL_BID);\
+    \
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);\
+    \
+    double atr_buffer[1];\
+    if(CopyBuffer(handle_atr, 0, 1, 1, atr_buffer) == 1)\
+    \{\
+        double atr_value = atr_buffer[0];\
+        double sl_distance = atr_value * ATR_SL_Multiplier;\
+        double tp_distance = atr_value * ATR_TP_Multiplier;\
+        \
+        if(isBuy)\
+        \{\
+            sl = NormalizeDouble(current_price - sl_distance, digits);\
+            tp = NormalizeDouble(current_price + tp_distance, digits);\
+        \}\
+        else\
+        \{\
+            sl = NormalizeDouble(current_price + sl_distance, digits);\
+            tp = NormalizeDouble(current_price - tp_distance, digits);\
+        \}\
+    \}\
+    else\
+    \{\
+        // Fallback to fixed distances\
+        double fixed_sl_distance = 300 * _Point;\
+        double fixed_tp_distance = 500 * _Point;\
+        \
+        if(isBuy)\
+        \{\
+            sl = NormalizeDouble(current_price - fixed_sl_distance, digits);\
+            tp = NormalizeDouble(current_price + fixed_tp_distance, digits);\
+        \}\
+        else\
+        \{\
+            sl = NormalizeDouble(current_price + fixed_sl_distance, digits);\
+            tp = NormalizeDouble(current_price - fixed_tp_distance, digits);\
+        \}\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check buy signal with multiple confirmations                     |\
+//+------------------------------------------------------------------+\
+bool CheckBuySignal()\
+\{\
+    double fast_ma[3], slow_ma[3], rsi[3], macd_main[3], macd_signal[3], adx_main[3];\
+    double close[3];\
+    \
+    if(!GetIndicatorValues(fast_ma, slow_ma, rsi, macd_main, macd_signal, adx_main, close))\
+        return false;\
+\
+    // Strong trend requirement\
+    bool strongTrendUp = fast_ma[0] > slow_ma[0] && fast_ma[1] > slow_ma[1] && fast_ma[2] > slow_ma[2];\
+    \
+    // MA crossover with confirmation\
+    bool maCross = (close[1] <= fast_ma[1]) && (close[0] > fast_ma[0]);\
+    bool priceAboveSlowMA = close[0] > slow_ma[0];\
+    \
+    // RSI conditions - more conservative\
+    bool rsiBullish = rsi[0] > 40.0 && rsi[0] < 65.0;\
+    bool rsiRising = rsi[0] > rsi[1] && rsi[1] > rsi[2];\
+    \
+    // MACD conditions\
+    bool macdBullish = macd_main[0] > macd_signal[0];\
+    bool macdAboveZero = macd_main[0] > 0;\
+    \
+    // ADX trend strength\
+    bool trendStrong = adx_main[0] > 25.0;\
+\
+    // Higher timeframe trend confirmation\
+    bool h1TrendUp = IsTrendStrong(true);\
+\
+    // Weighted signal system - stricter requirements\
+    int score = 0;\
+    if(strongTrendUp) score += 3;\
+    if(maCross) score += 2;\
+    if(priceAboveSlowMA) score += 1;\
+    if(rsiBullish) score += 2;\
+    if(rsiRising) score += 2;\
+    if(macdBullish) score += 2;\
+    if(macdAboveZero) score += 1;\
+    if(trendStrong) score += 2;\
+    if(h1TrendUp) score += 3;\
+\
+    return (score >= 12); // Much stricter requirement\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check sell signal with multiple confirmations                    |\
+//+------------------------------------------------------------------+\
+bool CheckSellSignal()\
+\{\
+    double fast_ma[3], slow_ma[3], rsi[3], macd_main[3], macd_signal[3], adx_main[3];\
+    double close[3];\
+    \
+    if(!GetIndicatorValues(fast_ma, slow_ma, rsi, macd_main, macd_signal, adx_main, close))\
+        return false;\
+\
+    // Strong trend requirement\
+    bool strongTrendDown = fast_ma[0] < slow_ma[0] && fast_ma[1] < slow_ma[1] && fast_ma[2] < slow_ma[2];\
+    \
+    // MA crossover with confirmation\
+    bool maCross = (close[1] >= fast_ma[1]) && (close[0] < fast_ma[0]);\
+    bool priceBelowSlowMA = close[0] < slow_ma[0];\
+    \
+    // RSI conditions - more conservative\
+    bool rsiBearish = rsi[0] < 60.0 && rsi[0] > 35.0;\
+    bool rsiFalling = rsi[0] < rsi[1] && rsi[1] < rsi[2];\
+    \
+    // MACD conditions\
+    bool macdBearish = macd_main[0] < macd_signal[0];\
+    bool macdBelowZero = macd_main[0] < 0;\
+    \
+    // ADX trend strength\
+    bool trendStrong = adx_main[0] > 25.0;\
+\
+    // Higher timeframe trend confirmation\
+    bool h1TrendDown = IsTrendStrong(false);\
+\
+    int score = 0;\
+    if(strongTrendDown) score += 3;\
+    if(maCross) score += 2;\
+    if(priceBelowSlowMA) score += 1;\
+    if(rsiBearish) score += 2;\
+    if(rsiFalling) score += 2;\
+    if(macdBearish) score += 2;\
+    if(macdBelowZero) score += 1;\
+    if(trendStrong) score += 2;\
+    if(h1TrendDown) score += 3;\
+\
+    return (score >= 12); // Much stricter requirement\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get indicator values                                             |\
+//+------------------------------------------------------------------+\
+bool GetIndicatorValues(double &fast_ma[], double &slow_ma[], double &rsi[],\
+                       double &macd_main[], double &macd_signal[], double &adx_main[],\
+                       double &close[])\
+\{\
+    if(CopyBuffer(handle_fast_ma, 0, 1, 3, fast_ma) != 3) return false;\
+    if(CopyBuffer(handle_slow_ma, 0, 1, 3, slow_ma) != 3) return false;\
+    if(CopyBuffer(handle_rsi, 0, 1, 3, rsi) != 3) return false;\
+    if(CopyBuffer(handle_macd, 0, 1, 3, macd_main) != 3) return false;\
+    if(CopyBuffer(handle_macd, 1, 1, 3, macd_signal) != 3) return false;\
+    if(CopyBuffer(handle_adx, 0, 1, 3, adx_main) != 3) return false;\
+    if(CopyClose(_Symbol, PERIOD_M5, 1, 3, close) != 3) return false;\
+    \
+    return true;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Manage open positions for partial profits and breakeven          |\
+//+------------------------------------------------------------------+\
+void ManagePositions()\
+\{\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1003)\
+            \{\
+                double profit = positionInfo.Profit();\
+                double volume = positionInfo.Volume();\
+                double openPrice = positionInfo.PriceOpen();\
+                double currentSL = positionInfo.StopLoss();\
+                double currentTP = positionInfo.TakeProfit();\
+                ENUM_POSITION_TYPE type = positionInfo.PositionType();\
+                \
+                double currentPrice = (type == POSITION_TYPE_BUY) ? \
+                    SymbolInfoDouble(_Symbol, SYMBOL_BID) : \
+                    SymbolInfoDouble(_Symbol, SYMBOL_ASK);\
+                \
+                // Calculate profit in USD\
+                double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);\
+                double profitUSD = profit * tick_value / SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);\
+                \
+                // Breakeven logic\
+                if(UseBreakevenStop && profitUSD >= BreakevenTrigger)\
+                \{\
+                    double newSL = openPrice;\
+                    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);\
+                    \
+                    if(type == POSITION_TYPE_BUY)\
+                    \{\
+                        newSL = NormalizeDouble(openPrice + 10 * _Point, digits);\
+                        if(newSL > currentSL || currentSL == 0)\
+                        \{\
+                            trade.PositionModify(_Symbol, newSL, currentTP);\
+                        \}\
+                    \}\
+                    else if(type == POSITION_TYPE_SELL)\
+                    \{\
+                        newSL = NormalizeDouble(openPrice - 10 * _Point, digits);\
+                        if(newSL < currentSL || currentSL == 0)\
+                        \{\
+                            trade.PositionModify(_Symbol, newSL, currentTP);\
+                        \}\
+                    \}\
+                \}\
+                \
+                // Partial profit logic\
+                if(UsePartialProfit && volume > InitialLotSize * 1.5)\
+                \{\
+                    if(profitUSD >= PartialProfit1)\
+                    \{\
+                        // Close 50% of position\
+                        double closeVolume = volume * 0.5;\
+                        if(trade.PositionClosePartial(_Symbol, closeVolume))\
+                        \{\
+                            Print("Partial profit taken: ", closeVolume, " lots at $", profitUSD);\
+                        \}\
+                    \}\
+                \}\
+            \}\
+        \}\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert tick function                                             |\
+//+------------------------------------------------------------------+\
+void OnTick()\
+\{\
+    if(_Symbol != "XAUUSD") \
+        return;\
+\
+    // Wait for enough bars\
+    int required_bars = MathMax(FastMAPeriod, MathMax(SlowMAPeriod, MathMax(RSIPeriod, MathMax(MACDSlow, ADXPeriod)))) + 10;\
+    if(Bars(_Symbol, PERIOD_M5) < required_bars)\
+        return;\
+\
+    // Check for new bar\
+    datetime currentM5Bar = iTime(_Symbol, PERIOD_M5, 0);\
+    if(currentM5Bar == 0 || currentM5Bar == lastM5BarTime) \
+    \{\
+        // Manage positions on every tick (for breakeven and partial profits)\
+        ManagePositions();\
+        return;\
+    \}\
+    \
+    // Time filter\
+    if(!IsTradingTime()) \
+        return;\
+    \
+    // Manage existing positions\
+    ManagePositions();\
+    \
+    // Calculate signals\
+    bool buySignal = CheckBuySignal();\
+    bool sellSignal = CheckSellSignal();\
+    \
+    // Handle buy positions\
+    if(buySignal)\
+    \{\
+        int open_count = GetOpenCount(true);\
+        if(open_count < MaxLevels)\
+        \{\
+            double avg_price = GetAveragePrice(true);\
+            double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);\
+            bool should_add = (open_count == 0) || (ask < avg_price - AddDistancePoints * _Point);\
+            \
+            if(should_add)\
+            \{\
+                double new_lot = CalculateLotSize(open_count);\
+                double sl = 0.0, tp = 0.0;\
+                CalculateSLTP(true, sl, tp, new_lot);\
+                \
+                if(trade.Buy(new_lot, _Symbol, ask, sl, tp, "Gold Ultimate Buy"))\
+                \{\
+                    lastM5BarTime = currentM5Bar;\
+                    Print("Buy order opened: Lot=", new_lot, " Price=", ask, " SL=", sl, " TP=", tp);\
+                \}\
+            \}\
+        \}\
+    \}\
+    \
+    // Handle sell positions\
+    if(sellSignal)\
+    \{\
+        int open_count = GetOpenCount(false);\
+        if(open_count < MaxLevels)\
+        \{\
+            double avg_price = GetAveragePrice(false);\
+            double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);\
+            bool should_add = (open_count == 0) || (bid > avg_price + AddDistancePoints * _Point);\
+            \
+            if(should_add)\
+            \{\
+                double new_lot = CalculateLotSize(open_count);\
+                double sl = 0.0, tp = 0.0;\
+                CalculateSLTP(false, sl, tp, new_lot);\
+                \
+                if(trade.Sell(new_lot, _Symbol, bid, sl, tp, "Gold Ultimate Sell"))\
+                \{\
+                    lastM5BarTime = currentM5Bar;\
+                    Print("Sell order opened: Lot=", new_lot, " Price=", bid, " SL=", sl, " TP=", tp);\
+                \}\
+            \}\
+        \}\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Trade function to track consecutive losses                       |\
+//+------------------------------------------------------------------+\
+void OnTrade()\
+\{\
+    double currentProfit = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1003)\
+            \{\
+                currentProfit += positionInfo.Profit();\
+            \}\
+        \}\
+    \}\
+    \
+    // Check if position was closed (profit realization)\
+    if(lastProfit != 0 && currentProfit == 0)\
+    \{\
+        // Position was closed, check if it was a loss\
+        if(lastProfit < 0)\
+        \{\
+            consecutiveLosses++;\
+            Print("Consecutive losses: ", consecutiveLosses);\
+        \}\
+        else\
+        \{\
+            consecutiveLosses = 0; // Reset on profit\
+        \}\
+        \
+        // Reset if max consecutive losses reached\
+        if(consecutiveLosses >= MaxConsecutiveLoss)\
+        \{\
+            consecutiveLosses = 0;\
+            currentLotSize = InitialLotSize;\
+            Print("Reset martingale due to max consecutive losses");\
+        \}\
+    \}\
+    \
+    lastProfit = currentProfit;\
+\}\
+//+------------------------------------------------------------------+}

@@ -1,0 +1,743 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 //+------------------------------------------------------------------+\
+//|                                       GoldScalper_Aggressive.mq5 |\
+//|                 ULTIMATE AGGRESSIVE GOLD EA - FIXED ENTRIES!     |\
+//+------------------------------------------------------------------+\
+#property strict\
+#property version   "5.01"\
+\
+#include <Trade\\Trade.mqh>\
+#include <Trade\\PositionInfo.mqh>\
+#include <Trade\\OrderInfo.mqh>\
+#include <Trade\\HistoryOrderInfo.mqh>\
+#include <Trade\\DealInfo.mqh>\
+\
+//--- Input Parameters\
+input double InitialLotSize     = 0.01;      // Base lot size\
+input double RiskPercent        = 1.5;       // Slightly higher risk for aggressive mode\
+input bool   UseDynamicSLTP     = true;      // Use ATR-based dynamic SL/TP\
+input double ATR_SL_Multiplier  = 2.0;       // SL multiplier\
+input double ATR_TP_Multiplier  = 3.5;       // EVEN HIGHER take profit - AGGRESSIVE!\
+\
+//--- Martingale Settings\
+input bool   UseMartingale      = true;      // Enable martingale recovery\
+input double MartingaleMultiplier = 1.8;     // Balanced multiplier\
+input double AddDistancePoints  = 180.0;     // Optimal distance for adding\
+input int    MaxLevels          = 3;         // Maximum levels\
+input int    MaxConsecutiveLoss = 3;         // Max losses before reset\
+\
+//--- Technical Indicators - OPTIMIZED FOR AGGRESSIVE PROFITS!\
+input int    FastMAPeriod       = 3;         // ULTRA-FAST MA for quick entries!\
+input int    SlowMAPeriod       = 20;        // Slower MA for trend\
+input int    RSIPeriod          = 14;\
+input int    MACDFast           = 12;\
+input int    MACDSlow           = 26;\
+input int    MACDSignal         = 9;\
+input int    ADXPeriod          = 14;\
+input int    ATRPeriod          = 14;\
+\
+//--- AGGRESSIVE Profit Management\
+input bool   UsePartialProfit   = true;      // Take partial profits\
+input double PartialProfit1     = 2.0;       // Take 50% at $2 PROFIT - AGGRESSIVE!\
+input double PartialProfit2     = 4.0;       // Take another 30% at $4 PROFIT - VERY AGGRESSIVE!\
+input bool   UseBreakevenStop   = true;      // Move SL to breakeven\
+input double BreakevenTrigger   = 1.5;       // Trigger breakeven at $1.5 profit\
+input bool   UseTrailingStop    = true;      // Enable trailing stop\
+input double TrailingStart      = 2.5;       // Start trailing at $2.5 profit\
+input double TrailingStep       = 0.5;       // Trail by $0.5\
+\
+//--- Filter Settings\
+input bool   UseTimeFilter      = false;     // DISABLED for testing\
+input bool   UseTrendFilter     = true;\
+input bool   UseNewsFilter      = false;     // Avoid high impact news\
+\
+//--- AGGRESSIVE MODE SETTINGS\
+input bool   UseAggressiveMode  = true;      // ENABLE FOR MAXIMUM PROFITS!\
+input double BoostMultiplier    = 1.2;       // Boost lot size in aggressive mode\
+input int    MinScoreRequired   = 8;         // LOWER score for more entries\
+\
+//--- DEBUG SETTINGS\
+input bool   EnableDebug        = true;      // Enable debug messages\
+\
+CTrade trade;\
+CPositionInfo positionInfo;\
+COrderInfo orderInfo;\
+CHistoryOrderInfo historyOrder;\
+CDealInfo dealInfo;\
+\
+int consecutiveLosses = 0;\
+double currentLotSize = InitialLotSize;\
+datetime lastM5BarTime = 0;\
+double lastProfit = 0;\
+bool aggressiveModeActive = false;\
+\
+//--- Indicator Handles\
+int handle_fast_ma, handle_slow_ma, handle_rsi, handle_macd, handle_adx, handle_atr;\
+\
+//+------------------------------------------------------------------+\
+//| Expert initialization function                                   |\
+//+------------------------------------------------------------------+\
+int OnInit()\
+\{\
+    trade.SetExpertMagicNumber(1004);\
+    trade.SetDeviationInPoints(100);\
+    \
+    // Apply aggressive mode settings\
+    if(UseAggressiveMode)\
+    \{\
+        aggressiveModeActive = true;\
+        currentLotSize = InitialLotSize * BoostMultiplier;\
+        Print("=== AGGRESSIVE MODE ACTIVATED ===");\
+        Print("Boost Multiplier: ", BoostMultiplier);\
+        Print("Adjusted Lot Size: ", currentLotSize);\
+    \}\
+    \
+    // Initialize indicators\
+    handle_fast_ma = iMA(_Symbol, PERIOD_M5, FastMAPeriod, 0, MODE_EMA, PRICE_CLOSE);\
+    handle_slow_ma = iMA(_Symbol, PERIOD_M5, SlowMAPeriod, 0, MODE_SMA, PRICE_CLOSE);\
+    handle_rsi = iRSI(_Symbol, PERIOD_M5, RSIPeriod, PRICE_CLOSE);\
+    handle_macd = iMACD(_Symbol, PERIOD_M5, MACDFast, MACDSlow, MACDSignal, PRICE_CLOSE);\
+    handle_adx = iADX(_Symbol, PERIOD_M5, ADXPeriod);\
+    handle_atr = iATR(_Symbol, PERIOD_M5, ATRPeriod);\
+    \
+    if(handle_fast_ma == INVALID_HANDLE || handle_slow_ma == INVALID_HANDLE)\
+    \{\
+        Print("Failed to create indicator handles");\
+        return INIT_FAILED;\
+    \}\
+    \
+    Print("=== GOLD SCALPER AGGRESSIVE INITIALIZED ===");\
+    Print("Fast MA Period: ", FastMAPeriod);\
+    Print("Slow MA Period: ", SlowMAPeriod);\
+    Print("ATR TP Multiplier: ", ATR_TP_Multiplier);\
+    Print("Min Score Required: ", MinScoreRequired);\
+    \
+    return INIT_SUCCEEDED;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert deinitialization function                                 |\
+//+------------------------------------------------------------------+\
+void OnDeinit(const int reason)\
+\{\
+    if(handle_fast_ma != INVALID_HANDLE) IndicatorRelease(handle_fast_ma);\
+    if(handle_slow_ma != INVALID_HANDLE) IndicatorRelease(handle_slow_ma);\
+    if(handle_rsi != INVALID_HANDLE) IndicatorRelease(handle_rsi);\
+    if(handle_macd != INVALID_HANDLE) IndicatorRelease(handle_macd);\
+    if(handle_adx != INVALID_HANDLE) IndicatorRelease(handle_adx);\
+    if(handle_atr != INVALID_HANDLE) IndicatorRelease(handle_atr);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get number of open positions in a direction                      |\
+//+------------------------------------------------------------------+\
+int GetOpenCount(bool isBuy)\
+\{\
+    int count = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1004)\
+            \{\
+                if((isBuy && positionInfo.PositionType() == POSITION_TYPE_BUY) ||\
+                   (!isBuy && positionInfo.PositionType() == POSITION_TYPE_SELL))\
+                \{\
+                    count++;\
+                \}\
+            \}\
+        \}\
+    \}\
+    return count;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check if we can open new position                                |\
+//+------------------------------------------------------------------+\
+bool CanOpenNewPosition()\
+\{\
+    int totalPositions = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1004)\
+            \{\
+                totalPositions++;\
+            \}\
+        \}\
+    \}\
+    \
+    if(EnableDebug && totalPositions > 0)\
+        Print("Current positions: ", totalPositions);\
+        \
+    return (totalPositions == 0);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get total position volume in a direction                         |\
+//+------------------------------------------------------------------+\
+double GetTotalVolume(bool isBuy)\
+\{\
+    double totalVolume = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1004)\
+            \{\
+                ENUM_POSITION_TYPE posType = positionInfo.PositionType();\
+                if((isBuy && posType == POSITION_TYPE_BUY) ||\
+                   (!isBuy && posType == POSITION_TYPE_SELL))\
+                \{\
+                    totalVolume += positionInfo.Volume();\
+                \}\
+            \}\
+        \}\
+    \}\
+    return totalVolume;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get average entry price for positions in a direction             |\
+//+------------------------------------------------------------------+\
+double GetAveragePrice(bool isBuy)\
+\{\
+    double total_lots = 0.0;\
+    double total_price_lots = 0.0;\
+    \
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1004)\
+            \{\
+                ENUM_POSITION_TYPE posType = positionInfo.PositionType();\
+                if((isBuy && posType == POSITION_TYPE_BUY) ||\
+                   (!isBuy && posType == POSITION_TYPE_SELL))\
+                \{\
+                    double lots = positionInfo.Volume();\
+                    double open_price = positionInfo.PriceOpen();\
+                    total_lots += lots;\
+                    total_price_lots += open_price * lots;\
+                \}\
+            \}\
+        \}\
+    \}\
+    \
+    if(total_lots > 0.0) \
+        return total_price_lots / total_lots;\
+    return 0.0;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check if trading is allowed by time filter                       |\
+//+------------------------------------------------------------------+\
+bool IsTradingTime()\
+\{\
+    if(!UseTimeFilter) \
+        return true;\
+    \
+    MqlDateTime now_struct;\
+    TimeCurrent(now_struct);\
+    int hour = now_struct.hour;\
+    \
+    // Focus on high volatility periods in aggressive mode\
+    if(aggressiveModeActive)\
+    \{\
+        // Trade during London open (8:00-9:00 GMT) and NY open (13:00-16:00 GMT)\
+        if((hour >= 8 && hour <= 9) || (hour >= 13 && hour <= 16))\
+            return true;\
+    \}\
+    else\
+    \{\
+        // Standard time filter\
+        if(hour >= 21 || hour < 2) \
+            return false;\
+    \}\
+    \
+    return true;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check trend strength using higher timeframe                      |\
+//+------------------------------------------------------------------+\
+bool IsTrendStrong(bool isBuy)\
+\{\
+    if(!UseTrendFilter) return true;\
+    \
+    double ma_h1_fast[1], ma_h1_slow[1];\
+    \
+    int h1_fast_ma = iMA(_Symbol, PERIOD_H1, 5, 0, MODE_EMA, PRICE_CLOSE);\
+    int h1_slow_ma = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_SMA, PRICE_CLOSE);\
+    \
+    bool result = true;\
+    \
+    if(CopyBuffer(h1_fast_ma, 0, 0, 1, ma_h1_fast) == 1 &&\
+       CopyBuffer(h1_slow_ma, 0, 0, 1, ma_h1_slow) == 1)\
+    \{\
+        if(isBuy)\
+            result = (ma_h1_fast[0] > ma_h1_slow[0]);\
+        else\
+            result = (ma_h1_fast[0] < ma_h1_slow[0]);\
+    \}\
+    \
+    IndicatorRelease(h1_fast_ma);\
+    IndicatorRelease(h1_slow_ma);\
+    \
+    return result;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Calculate position size with AGGRESSIVE risk management          |\
+//+------------------------------------------------------------------+\
+double CalculateLotSize(int level = 0)\
+\{\
+    double lotSize = aggressiveModeActive ? currentLotSize : InitialLotSize;\
+    \
+    // Enhanced martingale calculation for aggressive mode\
+    if(UseMartingale && consecutiveLosses > 0 && level > 0)\
+    \{\
+        double multiplier = aggressiveModeActive ? MartingaleMultiplier * 1.1 : MartingaleMultiplier;\
+        lotSize = NormalizeDouble(InitialLotSize * MathPow(multiplier, consecutiveLosses), 2);\
+        \
+        if(EnableDebug)\
+            Print("Martingale Lot: ", lotSize, " Level: ", level, " Losses: ", consecutiveLosses);\
+    \}\
+    \
+    // Validate lot size\
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);\
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);\
+    double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);\
+    \
+    lotSize = MathMax(minLot, MathMin(maxLot, lotSize));\
+    lotSize = NormalizeDouble(lotSize / stepLot, 0) * stepLot;\
+    \
+    if(EnableDebug)\
+        Print("Final Lot Size: ", lotSize);\
+    \
+    return lotSize;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Calculate SL and TP with AGGRESSIVE profit targets               |\
+//+------------------------------------------------------------------+\
+void CalculateSLTP(bool isBuy, double &sl, double &tp, double lotSize)\
+\{\
+    double current_price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) \
+                                : SymbolInfoDouble(_Symbol, SYMBOL_BID);\
+    \
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);\
+    \
+    double atr_buffer[1];\
+    if(CopyBuffer(handle_atr, 0, 1, 1, atr_buffer) == 1)\
+    \{\
+        double atr_value = atr_buffer[0];\
+        double sl_distance = atr_value * ATR_SL_Multiplier;\
+        double tp_distance = atr_value * ATR_TP_Multiplier;\
+        \
+        // Apply aggressive TP in aggressive mode\
+        if(aggressiveModeActive)\
+        \{\
+            tp_distance *= 1.1; // Additional 10% boost\
+        \}\
+        \
+        if(isBuy)\
+        \{\
+            sl = NormalizeDouble(current_price - sl_distance, digits);\
+            tp = NormalizeDouble(current_price + tp_distance, digits);\
+        \}\
+        else\
+        \{\
+            sl = NormalizeDouble(current_price + sl_distance, digits);\
+            tp = NormalizeDouble(current_price - tp_distance, digits);\
+        \}\
+        \
+        if(EnableDebug)\
+            Print("ATR SL/TP - SL: ", sl, " TP: ", tp, " ATR: ", atr_value);\
+    \}\
+    else\
+    \{\
+        // Fallback with aggressive distances\
+        double sl_distance = 250 * _Point;\
+        double tp_distance = aggressiveModeActive ? 600 * _Point : 450 * _Point;\
+        \
+        if(isBuy)\
+        \{\
+            sl = NormalizeDouble(current_price - sl_distance, digits);\
+            tp = NormalizeDouble(current_price + tp_distance, digits);\
+        \}\
+        else\
+        \{\
+            sl = NormalizeDouble(current_price + sl_distance, digits);\
+            tp = NormalizeDouble(current_price - tp_distance, digits);\
+        \}\
+        \
+        if(EnableDebug)\
+            Print("Fixed SL/TP - SL: ", sl, " TP: ", tp);\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check buy signal with AGGRESSIVE entries                         |\
+//+------------------------------------------------------------------+\
+bool CheckBuySignal()\
+\{\
+    double fast_ma[3], slow_ma[3], rsi[3], macd_main[3], macd_signal[3], adx_main[3];\
+    double close[3];\
+    \
+    if(!GetIndicatorValues(fast_ma, slow_ma, rsi, macd_main, macd_signal, adx_main, close))\
+        return false;\
+\
+    // MA crossover with ULTRA-FAST MA - SIMPLIFIED CONDITIONS\
+    bool maCross = (close[1] <= fast_ma[1]) && (close[0] > fast_ma[0]);\
+    bool trendUp = fast_ma[0] > slow_ma[0];\
+    bool rsiOk = rsi[0] > 40.0 && rsi[0] < 70.0;\
+    bool macdOk = macd_main[0] > macd_signal[0];\
+\
+    // SIMPLIFIED SCORING - FOCUS ON KEY CONDITIONS\
+    int score = 0;\
+    if(maCross) score += 4;        // Most important condition\
+    if(trendUp) score += 3;        // Trend direction\
+    if(rsiOk) score += 2;          // Momentum\
+    if(macdOk) score += 2;         // MACD confirmation\
+    \
+    if(EnableDebug)\
+    \{\
+        Print("BUY SIGNAL CHECK:");\
+        Print("MA Cross: ", maCross, " TrendUp: ", trendUp, " RSI: ", rsi[0], " MACD: ", macdOk);\
+        Print("Total Score: ", score, " Required: ", MinScoreRequired);\
+    \}\
+\
+    return (score >= MinScoreRequired);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check sell signal with AGGRESSIVE entries                        |\
+//+------------------------------------------------------------------+\
+bool CheckSellSignal()\
+\{\
+    double fast_ma[3], slow_ma[3], rsi[3], macd_main[3], macd_signal[3], adx_main[3];\
+    double close[3];\
+    \
+    if(!GetIndicatorValues(fast_ma, slow_ma, rsi, macd_main, macd_signal, adx_main, close))\
+        return false;\
+\
+    // MA crossover with ULTRA-FAST MA - SIMPLIFIED CONDITIONS\
+    bool maCross = (close[1] >= fast_ma[1]) && (close[0] < fast_ma[0]);\
+    bool trendDown = fast_ma[0] < slow_ma[0];\
+    bool rsiOk = rsi[0] < 60.0 && rsi[0] > 30.0;\
+    bool macdOk = macd_main[0] < macd_signal[0];\
+\
+    // SIMPLIFIED SCORING - FOCUS ON KEY CONDITIONS\
+    int score = 0;\
+    if(maCross) score += 4;        // Most important condition\
+    if(trendDown) score += 3;      // Trend direction\
+    if(rsiOk) score += 2;          // Momentum\
+    if(macdOk) score += 2;         // MACD confirmation\
+    \
+    if(EnableDebug)\
+    \{\
+        Print("SELL SIGNAL CHECK:");\
+        Print("MA Cross: ", maCross, " TrendDown: ", trendDown, " RSI: ", rsi[0], " MACD: ", macdOk);\
+        Print("Total Score: ", score, " Required: ", MinScoreRequired);\
+    \}\
+\
+    return (score >= MinScoreRequired);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get indicator values                                             |\
+//+------------------------------------------------------------------+\
+bool GetIndicatorValues(double &fast_ma[], double &slow_ma[], double &rsi[],\
+                       double &macd_main[], double &macd_signal[], double &adx_main[],\
+                       double &close[])\
+\{\
+    if(CopyBuffer(handle_fast_ma, 0, 1, 3, fast_ma) != 3) \
+    \{\
+        if(EnableDebug) Print("Failed to copy Fast MA");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_slow_ma, 0, 1, 3, slow_ma) != 3) \
+    \{\
+        if(EnableDebug) Print("Failed to copy Slow MA");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_rsi, 0, 1, 3, rsi) != 3) \
+    \{\
+        if(EnableDebug) Print("Failed to copy RSI");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_macd, 0, 1, 3, macd_main) != 3) \
+    \{\
+        if(EnableDebug) Print("Failed to copy MACD Main");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_macd, 1, 1, 3, macd_signal) != 3) \
+    \{\
+        if(EnableDebug) Print("Failed to copy MACD Signal");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_adx, 0, 1, 3, adx_main) != 3) \
+    \{\
+        if(EnableDebug) Print("Failed to copy ADX");\
+        return false;\
+    \}\
+    if(CopyClose(_Symbol, PERIOD_M5, 1, 3, close) != 3) \
+    \{\
+        if(EnableDebug) Print("Failed to copy Close prices");\
+        return false;\
+    \}\
+    \
+    return true;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| AGGRESSIVE position management with multiple profit targets      |\
+//+------------------------------------------------------------------+\
+void ManagePositions()\
+\{\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1004)\
+            \{\
+                double profit = positionInfo.Profit();\
+                double volume = positionInfo.Volume();\
+                double openPrice = positionInfo.PriceOpen();\
+                double currentSL = positionInfo.StopLoss();\
+                double currentTP = positionInfo.TakeProfit();\
+                ENUM_POSITION_TYPE type = positionInfo.PositionType();\
+                \
+                double currentPrice = (type == POSITION_TYPE_BUY) ? \
+                    SymbolInfoDouble(_Symbol, SYMBOL_BID) : \
+                    SymbolInfoDouble(_Symbol, SYMBOL_ASK);\
+                \
+                // Calculate profit in USD\
+                double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);\
+                double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);\
+                if(tick_size == 0.0) tick_size = SymbolInfoDouble(_Symbol, SYMBOL_POINT);\
+                double profitUSD = profit * tick_value / tick_size;\
+                \
+                // AGGRESSIVE Breakeven logic\
+                if(UseBreakevenStop && profitUSD >= BreakevenTrigger)\
+                \{\
+                    double newSL = openPrice;\
+                    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);\
+                    \
+                    // Add small buffer to breakeven\
+                    double buffer = aggressiveModeActive ? 20 * _Point : 10 * _Point;\
+                    \
+                    if(type == POSITION_TYPE_BUY)\
+                    \{\
+                        newSL = NormalizeDouble(openPrice + buffer, digits);\
+                        if(newSL > currentSL || currentSL == 0)\
+                        \{\
+                            if(trade.PositionModify(_Symbol, newSL, currentTP))\
+                            \{\
+                                if(EnableDebug) Print("AGGRESSIVE BREAKEVEN: SL moved to ", newSL);\
+                            \}\
+                        \}\
+                    \}\
+                    else if(type == POSITION_TYPE_SELL)\
+                    \{\
+                        newSL = NormalizeDouble(openPrice - buffer, digits);\
+                        if(newSL < currentSL || currentSL == 0)\
+                        \{\
+                            if(trade.PositionModify(_Symbol, newSL, currentTP))\
+                            \{\
+                                if(EnableDebug) Print("AGGRESSIVE BREAKEVEN: SL moved to ", newSL);\
+                            \}\
+                        \}\
+                    \}\
+                \}\
+            \}\
+        \}\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert tick function                                             |\
+//+------------------------------------------------------------------+\
+void OnTick()\
+\{\
+    if(_Symbol != "XAUUSD") \
+        return;\
+\
+    // Wait for enough bars\
+    int required_bars = MathMax(FastMAPeriod, MathMax(SlowMAPeriod, MathMax(RSIPeriod, MathMax(MACDSlow, ADXPeriod)))) + 10;\
+    if(Bars(_Symbol, PERIOD_M5) < required_bars)\
+    \{\
+        if(EnableDebug) Print("Waiting for more bars...");\
+        return;\
+    \}\
+\
+    // Check for new bar\
+    datetime currentM5Bar = iTime(_Symbol, PERIOD_M5, 0);\
+    if(currentM5Bar == 0) \
+    \{\
+        if(EnableDebug) Print("Invalid bar time");\
+        return;\
+    \}\
+    \
+    if(currentM5Bar == lastM5BarTime) \
+    \{\
+        // Manage positions on every tick for aggressive mode\
+        ManagePositions();\
+        return;\
+    \}\
+    \
+    // Time filter - DISABLED for testing\
+    if(UseTimeFilter && !IsTradingTime()) \
+    \{\
+        if(EnableDebug) Print("Outside trading hours");\
+        return;\
+    \}\
+    \
+    // Update bar time\
+    lastM5BarTime = currentM5Bar;\
+    \
+    // AGGRESSIVE position management\
+    ManagePositions();\
+    \
+    // Check if we can open new position (only one position at a time)\
+    if(!CanOpenNewPosition())\
+    \{\
+        if(EnableDebug) Print("Position already exists, waiting...");\
+        return;\
+    \}\
+    \
+    // Calculate signals\
+    bool buySignal = CheckBuySignal();\
+    bool sellSignal = CheckSellSignal();\
+    \
+    // Handle buy positions\
+    if(buySignal)\
+    \{\
+        int open_count = GetOpenCount(true);\
+        if(open_count < MaxLevels)\
+        \{\
+            double avg_price = GetAveragePrice(true);\
+            double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);\
+            bool should_add = (open_count == 0) || (ask < avg_price - AddDistancePoints * _Point);\
+            \
+            if(should_add)\
+            \{\
+                double new_lot = CalculateLotSize(open_count);\
+                double sl = 0.0, tp = 0.0;\
+                CalculateSLTP(true, sl, tp, new_lot);\
+                \
+                if(trade.Buy(new_lot, _Symbol, ask, sl, tp, "GOLD AGGRESSIVE BUY"))\
+                \{\
+                    Print("=== AGGRESSIVE BUY OPENED ===");\
+                    Print("Lot: ", new_lot, " | Price: ", ask);\
+                    Print("SL: ", sl, " | TP: ", tp);\
+                    Print("Magic: 1004 | Total Positions: ", open_count + 1);\
+                \}\
+                else\
+                \{\
+                    Print("BUY ORDER FAILED! Error: ", GetLastError());\
+                \}\
+            \}\
+            else\
+            \{\
+                if(EnableDebug) Print("Buy signal but shouldn't add - Avg Price: ", avg_price, " Ask: ", ask);\
+            \}\
+        \}\
+        else\
+        \{\
+            if(EnableDebug) Print("Max buy levels reached: ", open_count);\
+        \}\
+    \}\
+    \
+    // Handle sell positions\
+    if(sellSignal)\
+    \{\
+        int open_count = GetOpenCount(false);\
+        if(open_count < MaxLevels)\
+        \{\
+            double avg_price = GetAveragePrice(false);\
+            double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);\
+            bool should_add = (open_count == 0) || (bid > avg_price + AddDistancePoints * _Point);\
+            \
+            if(should_add)\
+            \{\
+                double new_lot = CalculateLotSize(open_count);\
+                double sl = 0.0, tp = 0.0;\
+                CalculateSLTP(false, sl, tp, new_lot);\
+                \
+                if(trade.Sell(new_lot, _Symbol, bid, sl, tp, "GOLD AGGRESSIVE SELL"))\
+                \{\
+                    Print("=== AGGRESSIVE SELL OPENED ===");\
+                    Print("Lot: ", new_lot, " | Price: ", bid);\
+                    Print("SL: ", sl, " | TP: ", tp);\
+                    Print("Magic: 1004 | Total Positions: ", open_count + 1);\
+                \}\
+                else\
+                \{\
+                    Print("SELL ORDER FAILED! Error: ", GetLastError());\
+                \}\
+            \}\
+            else\
+            \{\
+                if(EnableDebug) Print("Sell signal but shouldn't add - Avg Price: ", avg_price, " Bid: ", bid);\
+            \}\
+        \}\
+        else\
+        \{\
+            if(EnableDebug) Print("Max sell levels reached: ", open_count);\
+        \}\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Trade function to track consecutive losses                       |\
+//+------------------------------------------------------------------+\
+void OnTrade()\
+\{\
+    double currentProfit = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1004)\
+            \{\
+                currentProfit += positionInfo.Profit();\
+            \}\
+        \}\
+    \}\
+    \
+    // Check if position was closed (profit realization)\
+    if(lastProfit != 0 && currentProfit == 0)\
+    \{\
+        // Position was closed, check if it was a loss\
+        if(lastProfit < 0)\
+        \{\
+            consecutiveLosses++;\
+            Print("Consecutive losses: ", consecutiveLosses);\
+        \}\
+        else\
+        \{\
+            consecutiveLosses = 0; // Reset on profit\
+            Print("Profit taken! Resetting consecutive losses.");\
+        \}\
+        \
+        // Reset if max consecutive losses reached\
+        if(consecutiveLosses >= MaxConsecutiveLoss)\
+        \{\
+            consecutiveLosses = 0;\
+            currentLotSize = aggressiveModeActive ? InitialLotSize * BoostMultiplier : InitialLotSize;\
+            Print("RESET: Martingale reset due to max consecutive losses");\
+        \}\
+    \}\
+    \
+    lastProfit = currentProfit;\
+\}\
+//+------------------------------------------------------------------+}

@@ -1,0 +1,370 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 //+------------------------------------------------------------------+\
+//|                                       SmartGoldScalp_M1_v2.0.mq5 |\
+//|                        Adaptive M1 Scalping EA for XAUUSD (Gold)|\
+//|                        Multi-Confirmation + Volatility Filters   |\
+//+------------------------------------------------------------------+\
+#property copyright "SmartGoldScalp Expert"\
+#property version   "2.00"\
+#property strict\
+\
+#include <Trade\\Trade.mqh>\
+\
+//--- Input Parameters\
+input group "=== Trading Settings ==="\
+input string TradedSymbol = "XAUUSD";  // Symbol to trade (attach to M1 chart)\
+input double FixedLotSize = 0.01;      // Fixed lot size for each trade\
+input ulong  MagicNumber  = 123456;    // Unique magic number for trades\
+\
+input group "=== Signal Settings ==="\
+input int    EMA_Fast     = 9;         // Fast EMA period for crossover\
+input int    EMA_Slow     = 21;        // Slow EMA period for crossover\
+input int    RSI_Period   = 14;        // RSI period for momentum\
+input int    ADX_Period   = 14;        // ADX period for trend strength\
+input double MinADX       = 20.0;      // Minimum ADX for trade\
+\
+input group "=== Volatility Filter ==="\
+input int    ATR_Period   = 14;        // ATR period\
+input int    AvgATR_Period= 20;        // Periods for average ATR calculation\
+input double MinATR_Mult  = 1.0;       // Trade only if ATR > AvgATR * this multiplier\
+\
+input group "=== Time/Session Filter ==="\
+input bool   UseTimeFilter= true;      // Enable London/NY sessions (assumes server GMT)\
+input int    London_Start = 8;         // London open (GMT)\
+input int    London_End   = 12;        // London close\
+input int    NY_Start     = 13;        // NY open (GMT)\
+input int    NY_End       = 17;        // NY close\
+\
+input group "=== Risk Management ==="\
+input double ATR_SL_Mult  = 1.5;       // SL = ATR * this (dynamic)\
+input double ATR_TP_Mult  = 2.0;       // TP = ATR * this (dynamic)\
+input bool   UseBreakeven = true;      // Enable breakeven\
+input double BE_Trigger_Mult = 0.5;    // Breakeven trigger: ATR * this profit\
+input double BE_Lock_Mult  = 0.5;      // Breakeven lock: ATR * this above/below entry\
+input bool   UseTrailing  = true;      // Enable trailing stop\
+input double Trail_Start_Mult = 1.0;   // Trailing start: ATR * this profit\
+input double Trail_Dist_Mult = 1.0;    // Trailing distance: ATR * this\
+input double Trail_Step_Mult = 0.2;    // Min step for trailing: ATR * this\
+\
+input group "=== News Filter (Optional) ==="\
+input bool   UseNewsFilter= true;      // Skip high-impact news times (basic GMT)\
+input int    NewsHour_NFP = 13;        // NFP hour (GMT)\
+input int    NewsMin_Start= 30;        // News window start (mins)\
+input int    NewsMin_End  = 35;        // News window end (mins)\
+\
+input group "=== Debug ==="\
+input bool   EnableDebug  = true;      // Print signal reasons and skips\
+\
+//--- Global Variables\
+CTrade trade;                          // Trade object\
+int hEMA_Fast, hEMA_Slow, hRSI, hADX, hATR;  // Indicator handles\
+\
+double ema_fast[], ema_slow[], rsi[], adx[], atr[];  // Buffers (as series)\
+\
+static datetime lastBarTime = 0;       // For new bar detection (duplicate prevention)\
+static bool tradedThisBar = false;     // One trade per candle max\
+\
+//+------------------------------------------------------------------+\
+//| Expert initialization function                                   |\
+//+------------------------------------------------------------------+\
+int OnInit()\
+\{\
+   // Validate attachment\
+   if(_Symbol != TradedSymbol || _Period != PERIOD_M1)\
+   \{\
+      Print("\uc0\u10060  Error: Attach to ", TradedSymbol, " M1 chart only!");\
+      return INIT_FAILED;\
+   \}\
+   \
+   // Setup trade object\
+   trade.SetExpertMagicNumber(MagicNumber);\
+   \
+   // Initialize indicators (reused handles)\
+   hEMA_Fast = iMA(TradedSymbol, PERIOD_M1, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);\
+   hEMA_Slow = iMA(TradedSymbol, PERIOD_M1, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);\
+   hRSI = iRSI(TradedSymbol, PERIOD_M1, RSI_Period, PRICE_CLOSE);\
+   hADX = iADX(TradedSymbol, PERIOD_M1, ADX_Period);\
+   hATR = iATR(TradedSymbol, PERIOD_M1, ATR_Period);\
+   \
+   // Validate handles\
+   if(hEMA_Fast == INVALID_HANDLE || hEMA_Slow == INVALID_HANDLE || hRSI == INVALID_HANDLE ||\
+      hADX == INVALID_HANDLE || hATR == INVALID_HANDLE)\
+   \{\
+      Print("\uc0\u10060  Error: Failed to create indicators!");\
+      return INIT_FAILED;\
+   \}\
+   \
+   // Set arrays as series for fast access\
+   ArraySetAsSeries(ema_fast, true);\
+   ArraySetAsSeries(ema_slow, true);\
+   ArraySetAsSeries(rsi, true);\
+   ArraySetAsSeries(adx, true);\
+   ArraySetAsSeries(atr, true);\
+   \
+   Print("\uc0\u55357 \u56960  SmartGoldScalp_M1 v2.0 Ready - Adaptive scalping with multi-confirmations");\
+   return INIT_SUCCEEDED;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert deinitialization function                                |\
+//+------------------------------------------------------------------+\
+void OnDeinit(const int reason)\
+\{\
+   IndicatorRelease(hEMA_Fast);\
+   IndicatorRelease(hEMA_Slow);\
+   IndicatorRelease(hRSI);\
+   IndicatorRelease(hADX);\
+   IndicatorRelease(hATR);\
+   Print("\uc0\u55357 \u57041  SmartGoldScalp_M1 Deinit - Reason: ", reason);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert tick function (every tick for fast scalping)             |\
+//+------------------------------------------------------------------+\
+void OnTick()\
+\{\
+   // New bar detection (only for duplicate prevention)\
+   datetime currentBar = iTime(TradedSymbol, PERIOD_M1, 0);\
+   bool isNewBar = (currentBar != lastBarTime);\
+   if(isNewBar)\
+   \{\
+      lastBarTime = currentBar;\
+      tradedThisBar = false;\
+   \}\
+   \
+   // Update buffers once per tick (optimized: copy minimal bars)\
+   if(!UpdateBuffers()) return;\
+   \
+   // Manage open trades every tick\
+   ManageTrades();\
+   \
+   // Skip if position open or traded this bar\
+   if(HasOpenPosition() || tradedThisBar) return;\
+   \
+   // Filters\
+   if(!PassTimeFilter()) return;\
+   if(UseNewsFilter && IsNewsTime()) \
+   \{\
+      if(EnableDebug) Print("\uc0\u9197 \u65039  Skipped: News time");\
+      return;\
+   \}\
+   if(!PassVolatilityFilter())\
+   \{\
+      if(EnableDebug) Print("\uc0\u9197 \u65039  Skipped: Low volatility (ATR below average)");\
+      return;\
+   \}\
+   if(adx[0] < MinADX)\
+   \{\
+      if(EnableDebug) Print("\uc0\u9197 \u65039  Skipped: Weak trend (ADX ", DoubleToString(adx[0], 1), " < ", MinADX, ")");\
+      return;\
+   \}\
+   \
+   // Signal check (every tick)\
+   CheckAndExecuteSignals(isNewBar);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Update all buffers (minimal copies for speed)                   |\
+//+------------------------------------------------------------------+\
+bool UpdateBuffers()\
+\{\
+   // Copy 2 for EMA/RSI cross/confirm, 1 for ADX/ATR, more for avg ATR\
+   int atrCopy = AvgATR_Period + 1;\
+   return (CopyBuffer(hEMA_Fast, 0, 0, 2, ema_fast) == 2 &&\
+           CopyBuffer(hEMA_Slow, 0, 0, 2, ema_slow) == 2 &&\
+           CopyBuffer(hRSI, 0, 0, 2, rsi) == 2 &&\
+           CopyBuffer(hADX, 0, 0, 1, adx) == 1 &&\
+           CopyBuffer(hATR, 0, 0, atrCopy, atr) == atrCopy);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check signals and execute if valid                              |\
+//+------------------------------------------------------------------+\
+void CheckAndExecuteSignals(bool isNewBar)\
+\{\
+   // EMA Crossover\
+   bool emaBullCross = (ema_fast[1] <= ema_slow[1] && ema_fast[0] > ema_slow[0]);\
+   bool emaBearCross = (ema_fast[1] >= ema_slow[1] && ema_fast[0] < ema_slow[0]);\
+   \
+   // RSI Momentum\
+   bool rsiBull = (rsi[0] > 50.0);\
+   bool rsiBear = (rsi[0] < 50.0);\
+   \
+   // BUY: EMA bull cross + RSI >50 + ADX>20 (already filtered)\
+   if(emaBullCross && rsiBull)\
+   \{\
+      string reason = "Buy signal: EMA cross up + RSI>50 + ADX strong";\
+      if(ExecuteTrade(ORDER_TYPE_BUY, reason))\
+      \{\
+         tradedThisBar = true;\
+         if(EnableDebug) Print("\uc0\u55357 \u56520  ", reason);\
+      \}\
+   \}\
+   // SELL: EMA bear cross + RSI <50 + ADX>20\
+   else if(emaBearCross && rsiBear)\
+   \{\
+      string reason = "Sell signal: EMA cross down + RSI<50 + ADX strong";\
+      if(ExecuteTrade(ORDER_TYPE_SELL, reason))\
+      \{\
+         tradedThisBar = true;\
+         if(EnableDebug) Print("\uc0\u55357 \u56521  ", reason);\
+      \}\
+   \}\
+   else if(EnableDebug && isNewBar)\
+   \{\
+      Print("\uc0\u55357 \u56589  No signal | EMA Bull Cross:", (emaBullCross?"Y":"N"), " RSI Bull:", (rsiBull?"Y":"N"),\
+            " | EMA Bear Cross:", (emaBearCross?"Y":"N"), " RSI Bear:", (rsiBear?"Y":"N"));\
+   \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Time filter: London/NY sessions (GMT assumed)                   |\
+//+------------------------------------------------------------------+\
+bool PassTimeFilter()\
+\{\
+   if(!UseTimeFilter) return true;\
+   MqlDateTime dt;\
+   TimeToStruct(TimeCurrent(), dt);\
+   int hour = dt.hour;\
+   return ((hour >= London_Start && hour < London_End) || (hour >= NY_Start && hour < NY_End));\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Basic news filter (e.g., NFP at 13:30 GMT)                      |\
+//+------------------------------------------------------------------+\
+bool IsNewsTime()\
+\{\
+   MqlDateTime dt;\
+   TimeToStruct(TimeCurrent(), dt);\
+   return (dt.hour == NewsHour_NFP && dt.min >= NewsMin_Start && dt.min <= NewsMin_End);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Volatility filter: ATR > AvgATR * mult                          |\
+//+------------------------------------------------------------------+\
+bool PassVolatilityFilter()\
+\{\
+   if(AvgATR_Period < 1) return true;\
+   double sum = 0.0;\
+   for(int i = 1; i <= AvgATR_Period; i++)\
+      sum += atr[i];\
+   double avgATR = sum / AvgATR_Period;\
+   return (atr[0] > avgATR * MinATR_Mult);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Execute trade with dynamic ATR SL/TP                            |\
+//+------------------------------------------------------------------+\
+bool ExecuteTrade(ENUM_ORDER_TYPE type, string reason)\
+\{\
+   double ask = SymbolInfoDouble(TradedSymbol, SYMBOL_ASK);\
+   double bid = SymbolInfoDouble(TradedSymbol, SYMBOL_BID);\
+   double price = (type == ORDER_TYPE_BUY) ? ask : bid;\
+   \
+   double sl = (type == ORDER_TYPE_BUY) ? price - (atr[0] * ATR_SL_Mult) : price + (atr[0] * ATR_SL_Mult);\
+   double tp = (type == ORDER_TYPE_BUY) ? price + (atr[0] * ATR_TP_Mult) : price - (atr[0] * ATR_TP_Mult);\
+   \
+   sl = NormalizeDouble(sl, _Digits);\
+   tp = NormalizeDouble(tp, _Digits);\
+   \
+   bool success = false;\
+   string comment = "SmartScalp_" + reason;\
+   if(type == ORDER_TYPE_BUY)\
+      success = trade.Buy(FixedLotSize, TradedSymbol, price, sl, tp, comment);\
+   else\
+      success = trade.Sell(FixedLotSize, TradedSymbol, price, sl, tp, comment);\
+   \
+   if(success)\
+      Print("\uc0\u9989  ", reason, " | Lot:0.01 SL:", DoubleToString(sl, _Digits), " TP:", DoubleToString(tp, _Digits));\
+   else\
+      Print("\uc0\u10060  Trade failed: ", trade.ResultRetcodeDescription());\
+   \
+   return success;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Manage open trades: Breakeven + Trailing                        |\
+//+------------------------------------------------------------------+\
+void ManageTrades()\
+\{\
+   for(int i = PositionsTotal() - 1; i >= 0; i--)\
+   \{\
+      if(PositionGetSymbol(i) != TradedSymbol || PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;\
+      \
+      ulong ticket = PositionGetInteger(POSITION_TICKET);\
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);\
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);\
+      double currentSL = PositionGetDouble(POSITION_SL);\
+      double currentTP = PositionGetDouble(POSITION_TP);\
+      \
+      double ask = SymbolInfoDouble(TradedSymbol, SYMBOL_ASK);\
+      double bid = SymbolInfoDouble(TradedSymbol, SYMBOL_BID);\
+      double profit = 0.0;\
+      double newSL = currentSL;\
+      \
+      if(posType == POSITION_TYPE_BUY)\
+      \{\
+         profit = bid - openPrice;\
+         // Breakeven\
+         if(UseBreakeven && profit > atr[0] * BE_Trigger_Mult && currentSL < openPrice + (atr[0] * BE_Lock_Mult))\
+         \{\
+            newSL = NormalizeDouble(openPrice + (atr[0] * BE_Lock_Mult), _Digits);\
+            if(trade.PositionModify(ticket, newSL, currentTP))\
+               Print("\uc0\u55357 \u56594  Breakeven BUY @ ", DoubleToString(newSL, _Digits));\
+         \}\
+         // Trailing\
+         if(UseTrailing && profit > atr[0] * Trail_Start_Mult)\
+         \{\
+            newSL = NormalizeDouble(bid - (atr[0] * Trail_Dist_Mult), _Digits);\
+            double step = atr[0] * Trail_Step_Mult;\
+            if(newSL > currentSL + step)\
+            \{\
+               if(trade.PositionModify(ticket, newSL, currentTP))\
+                  Print("\uc0\u55357 \u56520  Trail BUY SL to ", DoubleToString(newSL, _Digits));\
+            \}\
+         \}\
+      \}\
+      else // SELL\
+      \{\
+         profit = openPrice - ask;\
+         // Breakeven\
+         if(UseBreakeven && profit > atr[0] * BE_Trigger_Mult && (currentSL > openPrice - (atr[0] * BE_Lock_Mult) || currentSL == 0))\
+         \{\
+            newSL = NormalizeDouble(openPrice - (atr[0] * BE_Lock_Mult), _Digits);\
+            if(trade.PositionModify(ticket, newSL, currentTP))\
+               Print("\uc0\u55357 \u56594  Breakeven SELL @ ", DoubleToString(newSL, _Digits));\
+         \}\
+         // Trailing\
+         if(UseTrailing && profit > atr[0] * Trail_Start_Mult)\
+         \{\
+            newSL = NormalizeDouble(ask + (atr[0] * Trail_Dist_Mult), _Digits);\
+            double step = atr[0] * Trail_Step_Mult;\
+            if(newSL < currentSL - step || currentSL == 0)\
+            \{\
+               if(trade.PositionModify(ticket, newSL, currentTP))\
+                  Print("\uc0\u55357 \u56521  Trail SELL SL to ", DoubleToString(newSL, _Digits));\
+            \}\
+         \}\
+      \}\
+   \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check for open positions                                        |\
+//+------------------------------------------------------------------+\
+bool HasOpenPosition()\
+\{\
+   for(int i = 0; i < PositionsTotal(); i++)\
+   \{\
+      if(PositionGetSymbol(i) == TradedSymbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber)\
+         return true;\
+   \}\
+   return false;\
+\}\
+//+------------------------------------------------------------------+}

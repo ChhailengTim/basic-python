@@ -1,0 +1,694 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 //+------------------------------------------------------------------+\
+//|                                          GoldScalper_Scalping.mq5|\
+//|                 FIXED ULTRA-FAST GOLD SCALPING EA - WORKING!    |\
+//+------------------------------------------------------------------+\
+#property strict\
+#property version   "5.05"\
+\
+#include <Trade\\Trade.mqh>\
+#include <Trade\\PositionInfo.mqh>\
+#include <Trade\\OrderInfo.mqh>\
+#include <Trade\\HistoryOrderInfo.mqh>\
+#include <Trade\\DealInfo.mqh>\
+\
+//--- SCALPING PARAMETERS\
+input double InitialLotSize     = 0.01;      // Base lot size\
+input double RiskPercent        = 0.5;       // LOWER risk for frequent trades\
+input bool   UseDynamicSLTP     = true;      // Use ATR-based dynamic SL/TP\
+input double ATR_SL_Multiplier  = 1.5;       // Slightly wider SL for better entries\
+input double ATR_TP_Multiplier  = 2.0;       // Better R:R ratio\
+\
+//--- SCALPING MARTINGALE (BE CAREFUL!)\
+input bool   UseMartingale      = false;     // DISABLED for scalping safety!\
+input double MartingaleMultiplier = 1.3;     // Small multiplier if enabled\
+input int    MaxLevels          = 1;         // Only 1 position at a time!\
+input int    MaxConsecutiveLoss = 3;         // Stop after 3 losses\
+\
+//--- ULTRA-FAST SCALPING INDICATORS\
+input int    FastMAPeriod       = 3;         // ULTRA-FAST MA for scalping\
+input int    SlowMAPeriod       = 8;         // Fast MA for trend\
+input int    RSIPeriod          = 7;         // Faster RSI for scalping\
+input int    MACDFast           = 6;         // Faster MACD\
+input int    MACDSlow           = 13;        // Faster MACD\
+input int    MACDSignal         = 5;         // Faster MACD\
+input int    ADXPeriod          = 8;         // Faster ADX\
+input int    ATRPeriod          = 7;         // Faster ATR for scalping\
+\
+//--- SCALPING Profit Management\
+input bool   UsePartialProfit   = false;     // NO partial profits in scalping\
+input bool   UseBreakevenStop   = true;      // Quick breakeven\
+input double BreakevenTrigger   = 0.5;       // Fast breakeven at $0.5\
+input bool   UseTrailingStop    = true;      // Quick trailing\
+input double TrailingStart      = 0.8;       // Start trailing at $0.8\
+input double TrailingStep       = 0.2;       // Small trailing steps\
+\
+//--- SCALPING FILTERS\
+input bool   UseTimeFilter      = false;     // Trade all hours for scalping\
+input bool   UseTrendFilter     = false;     // No trend filter for quick trades\
+input int    MinBarsBetweenTrades = 1;       // Minimum 1 bar between trades\
+\
+//--- SCALPING SIGNAL SETTINGS\
+input int    MinScoreRequired   = 4;         // LOWER score for more signals\
+\
+//--- DEBUG SETTINGS\
+input bool   EnableDebug        = true;      // Enable debug messages\
+\
+CTrade trade;\
+CPositionInfo positionInfo;\
+COrderInfo orderInfo;\
+CHistoryOrderInfo historyOrder;\
+CDealInfo dealInfo;\
+\
+int consecutiveLosses = 0;\
+double currentLotSize = InitialLotSize;\
+datetime lastM1BarTime = 0;\
+double lastProfit = 0;\
+datetime lastTradeTime = 0;\
+int totalTradesToday = 0;\
+datetime lastDayCheck = 0;\
+\
+//--- Indicator Handles\
+int handle_fast_ma, handle_slow_ma, handle_rsi, handle_macd, handle_adx, handle_atr;\
+\
+//+------------------------------------------------------------------+\
+//| Expert initialization function                                   |\
+//+------------------------------------------------------------------+\
+int OnInit()\
+\{\
+    trade.SetExpertMagicNumber(1007);\
+    trade.SetDeviationInPoints(50);\
+    \
+    // Initialize indicators\
+    handle_fast_ma = iMA(_Symbol, PERIOD_M1, FastMAPeriod, 0, MODE_EMA, PRICE_CLOSE);\
+    handle_slow_ma = iMA(_Symbol, PERIOD_M1, SlowMAPeriod, 0, MODE_SMA, PRICE_CLOSE);\
+    handle_rsi = iRSI(_Symbol, PERIOD_M1, RSIPeriod, PRICE_CLOSE);\
+    handle_macd = iMACD(_Symbol, PERIOD_M1, MACDFast, MACDSlow, MACDSignal, PRICE_CLOSE);\
+    handle_adx = iADX(_Symbol, PERIOD_M1, ADXPeriod);\
+    handle_atr = iATR(_Symbol, PERIOD_M1, ATRPeriod);\
+    \
+    if(handle_fast_ma == INVALID_HANDLE || handle_slow_ma == INVALID_HANDLE)\
+    \{\
+        Print("Failed to create indicator handles");\
+        return INIT_FAILED;\
+    \}\
+    \
+    Print("=== GOLD SCALPER M1 FIXED VERSION INITIALIZED ===");\
+    Print("Timeframe: M1 (1 Minute)");\
+    Print("Fast MA: ", FastMAPeriod, " | Slow MA: ", SlowMAPeriod);\
+    Print("Min Score Required: ", MinScoreRequired);\
+    Print("Magic Number: 1007");\
+    \
+    return INIT_SUCCEEDED;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert deinitialization function                                 |\
+//+------------------------------------------------------------------+\
+void OnDeinit(const int reason)\
+\{\
+    if(handle_fast_ma != INVALID_HANDLE) IndicatorRelease(handle_fast_ma);\
+    if(handle_slow_ma != INVALID_HANDLE) IndicatorRelease(handle_slow_ma);\
+    if(handle_rsi != INVALID_HANDLE) IndicatorRelease(handle_rsi);\
+    if(handle_macd != INVALID_HANDLE) IndicatorRelease(handle_macd);\
+    if(handle_adx != INVALID_HANDLE) IndicatorRelease(handle_adx);\
+    if(handle_atr != INVALID_HANDLE) IndicatorRelease(handle_atr);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Reset daily statistics                                           |\
+//+------------------------------------------------------------------+\
+void ResetDailyStats()\
+\{\
+    MqlDateTime today, now;\
+    TimeToStruct(TimeCurrent(), now);\
+    TimeToStruct(TimeCurrent(), today);\
+    today.hour = 0;\
+    today.min = 0;\
+    today.sec = 0;\
+    \
+    datetime todayStart = StructToTime(today);\
+    \
+    if(TimeCurrent() >= todayStart && lastDayCheck < todayStart)\
+    \{\
+        totalTradesToday = 0;\
+        lastDayCheck = TimeCurrent();\
+        Print("Daily stats reset. Trades today: ", totalTradesToday);\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get number of open positions                                     |\
+//+------------------------------------------------------------------+\
+int GetOpenCount(bool isBuy)\
+\{\
+    int count = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1007)\
+            \{\
+                if((isBuy && positionInfo.PositionType() == POSITION_TYPE_BUY) ||\
+                   (!isBuy && positionInfo.PositionType() == POSITION_TYPE_SELL))\
+                \{\
+                    count++;\
+                \}\
+            \}\
+        \}\
+    \}\
+    return count;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Check if we can open new position (FIXED VERSION)               |\
+//+------------------------------------------------------------------+\
+bool CanOpenNewPosition()\
+\{\
+    // Reset daily stats\
+    ResetDailyStats();\
+    \
+    // Only one position at a time for scalping\
+    if(PositionsTotal() > 0)\
+    \{\
+        if(EnableDebug) Print("Cannot open: Position already exists");\
+        return false;\
+    \}\
+    \
+    // Check time between trades\
+    if(TimeCurrent() - lastTradeTime < MinBarsBetweenTrades * 60)\
+    \{\
+        if(EnableDebug) Print("Cannot open: Waiting between trades");\
+        return false;\
+    \}\
+    \
+    return true;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get total number of positions                                    |\
+//+------------------------------------------------------------------+\
+int GetTotalPositions()\
+\{\
+    int count = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1007)\
+            \{\
+                count++;\
+            \}\
+        \}\
+    \}\
+    return count;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| SCALPING lot size calculation (FIXED)                           |\
+//+------------------------------------------------------------------+\
+double CalculateLotSize()\
+\{\
+    double lotSize = InitialLotSize;\
+    \
+    // Very conservative martingale for scalping\
+    if(UseMartingale && consecutiveLosses > 0)\
+    \{\
+        lotSize = NormalizeDouble(InitialLotSize * MathPow(MartingaleMultiplier, consecutiveLosses), 2);\
+        Print("Martingale activated: Lot size = ", lotSize);\
+    \}\
+    \
+    // Risk-based calculation\
+    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);\
+    double riskAmount = accountBalance * RiskPercent / 100.0;\
+    \
+    // Use fixed SL distance for calculation\
+    double sl_distance = 200 * _Point; // Fixed SL distance\
+    \
+    double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);\
+    double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);\
+    if(tick_size == 0.0) \
+        tick_size = SymbolInfoDouble(_Symbol, SYMBOL_POINT);\
+    \
+    double point_value = tick_value / tick_size;\
+    double riskPerLot = sl_distance * point_value * InitialLotSize;\
+    \
+    if(riskPerLot > 0)\
+    \{\
+        double riskBasedLot = riskAmount / riskPerLot * InitialLotSize;\
+        lotSize = MathMin(lotSize, riskBasedLot); // Use the smaller one\
+    \}\
+    \
+    // Validate lot size\
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);\
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);\
+    double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);\
+    \
+    lotSize = MathMax(minLot, MathMin(maxLot, lotSize));\
+    lotSize = NormalizeDouble(lotSize / stepLot, 0) * stepLot;\
+    \
+    if(EnableDebug) Print("Calculated Lot Size: ", lotSize);\
+    \
+    return lotSize;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| SCALPING SL/TP calculation (FIXED)                              |\
+//+------------------------------------------------------------------+\
+void CalculateSLTP(bool isBuy, double &sl, double &tp, double lotSize)\
+\{\
+    double current_price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) \
+                                : SymbolInfoDouble(_Symbol, SYMBOL_BID);\
+    \
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);\
+    \
+    if(UseDynamicSLTP)\
+    \{\
+        double atr_buffer[1];\
+        if(CopyBuffer(handle_atr, 0, 0, 1, atr_buffer) == 1) // FIXED: Use current bar (0)\
+        \{\
+            double atr_value = atr_buffer[0];\
+            double sl_distance = atr_value * ATR_SL_Multiplier;\
+            double tp_distance = atr_value * ATR_TP_Multiplier;\
+            \
+            // Ensure minimum distances\
+            sl_distance = MathMax(sl_distance, 100 * _Point);\
+            tp_distance = MathMax(tp_distance, 150 * _Point);\
+            \
+            if(isBuy)\
+            \{\
+                sl = NormalizeDouble(current_price - sl_distance, digits);\
+                tp = NormalizeDouble(current_price + tp_distance, digits);\
+            \}\
+            else\
+            \{\
+                sl = NormalizeDouble(current_price + sl_distance, digits);\
+                tp = NormalizeDouble(current_price - tp_distance, digits);\
+            \}\
+            \
+            if(EnableDebug) Print("Dynamic SL/TP - SL: ", sl, " TP: ", tp, " ATR: ", atr_value);\
+            return;\
+        \}\
+    \}\
+    \
+    // Fixed distances for scalping (FALLBACK)\
+    double sl_distance = 200 * _Point;\
+    double tp_distance = 300 * _Point;\
+    \
+    if(isBuy)\
+    \{\
+        sl = NormalizeDouble(current_price - sl_distance, digits);\
+        tp = NormalizeDouble(current_price + tp_distance, digits);\
+    \}\
+    else\
+    \{\
+        sl = NormalizeDouble(current_price + sl_distance, digits);\
+        tp = NormalizeDouble(current_price - tp_distance, digits);\
+    \}\
+    \
+    if(EnableDebug) Print("Fixed SL/TP - SL: ", sl, " TP: ", tp);\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| ULTRA-FAST SCALPING buy signal (FIXED)                          |\
+//+------------------------------------------------------------------+\
+bool CheckScalpingBuySignal()\
+\{\
+    double fast_ma[2], slow_ma[2], rsi[2], macd_main[2], macd_signal[2];\
+    double close[2];\
+    \
+    // Get only 2 bars for speed\
+    if(!GetScalpingIndicatorValues(fast_ma, slow_ma, rsi, macd_main, macd_signal, close))\
+    \{\
+        if(EnableDebug) Print("BUY SIGNAL: Failed to get indicator values");\
+        return false;\
+    \}\
+\
+    // SIMPLE & FAST CONDITIONS FOR SCALPING\
+    bool maCross = (close[1] <= fast_ma[1]) && (close[0] > fast_ma[0]);\
+    bool trendUp = fast_ma[0] > slow_ma[0];\
+    bool rsiOk = rsi[0] > 40.0 && rsi[0] < 75.0; // Wider range for more signals\
+    bool macdOk = macd_main[0] > macd_signal[0];\
+    bool rsiRising = rsi[0] > rsi[1];\
+\
+    // FAST SCORING - SIMPLE CONDITIONS\
+    int score = 0;\
+    if(maCross) score += 3;    // Most important\
+    if(trendUp) score += 2;    // Trend\
+    if(rsiOk) score += 1;      // Momentum\
+    if(macdOk) score += 2;     // MACD\
+    if(rsiRising) score += 1;  // RSI direction\
+    \
+    bool signal = (score >= MinScoreRequired);\
+    \
+    if(EnableDebug) \
+    \{\
+        Print("BUY SIGNAL CHECK:");\
+        Print("MA Cross: ", maCross, " (", close[1], " <= ", fast_ma[1], " && ", close[0], " > ", fast_ma[0], ")");\
+        Print("Trend Up: ", trendUp, " RSI: ", rsi[0], " MACD: ", macdOk);\
+        Print("Score: ", score, "/", MinScoreRequired, " Signal: ", signal);\
+    \}\
+\
+    return signal;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| ULTRA-FAST SCALPING sell signal (FIXED)                         |\
+//+------------------------------------------------------------------+\
+bool CheckScalpingSellSignal()\
+\{\
+    double fast_ma[2], slow_ma[2], rsi[2], macd_main[2], macd_signal[2];\
+    double close[2];\
+    \
+    if(!GetScalpingIndicatorValues(fast_ma, slow_ma, rsi, macd_main, macd_signal, close))\
+    \{\
+        if(EnableDebug) Print("SELL SIGNAL: Failed to get indicator values");\
+        return false;\
+    \}\
+\
+    // SIMPLE & FAST CONDITIONS FOR SCALPING\
+    bool maCross = (close[1] >= fast_ma[1]) && (close[0] < fast_ma[0]);\
+    bool trendDown = fast_ma[0] < slow_ma[0];\
+    bool rsiOk = rsi[0] < 60.0 && rsi[0] > 25.0; // Wider range for more signals\
+    bool macdOk = macd_main[0] < macd_signal[0];\
+    bool rsiFalling = rsi[0] < rsi[1];\
+\
+    int score = 0;\
+    if(maCross) score += 3;\
+    if(trendDown) score += 2;\
+    if(rsiOk) score += 1;\
+    if(macdOk) score += 2;\
+    if(rsiFalling) score += 1;\
+    \
+    bool signal = (score >= MinScoreRequired);\
+    \
+    if(EnableDebug) \
+    \{\
+        Print("SELL SIGNAL CHECK:");\
+        Print("MA Cross: ", maCross, " (", close[1], " >= ", fast_ma[1], " && ", close[0], " < ", fast_ma[0], ")");\
+        Print("Trend Down: ", trendDown, " RSI: ", rsi[0], " MACD: ", macdOk);\
+        Print("Score: ", score, "/", MinScoreRequired, " Signal: ", signal);\
+    \}\
+\
+    return signal;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| FAST indicator values for scalping (FIXED)                      |\
+//+------------------------------------------------------------------+\
+bool GetScalpingIndicatorValues(double &fast_ma[], double &slow_ma[], double &rsi[],\
+                               double &macd_main[], double &macd_signal[], double &close[])\
+\{\
+    // Resize arrays if needed\
+    ArrayResize(fast_ma, 2);\
+    ArrayResize(slow_ma, 2);\
+    ArrayResize(rsi, 2);\
+    ArrayResize(macd_main, 2);\
+    ArrayResize(macd_signal, 2);\
+    ArrayResize(close, 2);\
+    \
+    // Copy current and previous values (index 0 = current, 1 = previous)\
+    if(CopyBuffer(handle_fast_ma, 0, 0, 2, fast_ma) != 2) \
+    \{\
+        if(EnableDebug) Print("Failed to copy Fast MA");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_slow_ma, 0, 0, 2, slow_ma) != 2) \
+    \{\
+        if(EnableDebug) Print("Failed to copy Slow MA");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_rsi, 0, 0, 2, rsi) != 2) \
+    \{\
+        if(EnableDebug) Print("Failed to copy RSI");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_macd, 0, 0, 2, macd_main) != 2) \
+    \{\
+        if(EnableDebug) Print("Failed to copy MACD Main");\
+        return false;\
+    \}\
+    if(CopyBuffer(handle_macd, 1, 0, 2, macd_signal) != 2) \
+    \{\
+        if(EnableDebug) Print("Failed to copy MACD Signal");\
+        return false;\
+    \}\
+    if(CopyClose(_Symbol, PERIOD_M1, 0, 2, close) != 2) \
+    \{\
+        if(EnableDebug) Print("Failed to copy Close prices");\
+        return false;\
+    \}\
+    \
+    return true;\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| FAST position management for scalping                           |\
+//+------------------------------------------------------------------+\
+void ManageScalpingPositions()\
+\{\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1007)\
+            \{\
+                double profit = positionInfo.Profit();\
+                double openPrice = positionInfo.PriceOpen();\
+                double currentSL = positionInfo.StopLoss();\
+                double currentTP = positionInfo.TakeProfit();\
+                ENUM_POSITION_TYPE type = positionInfo.PositionType();\
+                \
+                // Calculate profit in USD\
+                double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);\
+                double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);\
+                if(tick_size == 0.0) tick_size = SymbolInfoDouble(_Symbol, SYMBOL_POINT);\
+                double profitUSD = profit * tick_value / tick_size;\
+                \
+                // FAST Breakeven for scalping\
+                if(UseBreakevenStop && profitUSD >= BreakevenTrigger)\
+                \{\
+                    double newSL = openPrice;\
+                    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);\
+                    \
+                    if(type == POSITION_TYPE_BUY)\
+                    \{\
+                        newSL = NormalizeDouble(openPrice + 10 * _Point, digits);\
+                        if(newSL > currentSL || currentSL == 0)\
+                        \{\
+                            if(trade.PositionModify(_Symbol, newSL, currentTP))\
+                            \{\
+                                if(EnableDebug) Print("Breakeven activated for BUY: SL moved to ", newSL);\
+                            \}\
+                        \}\
+                    \}\
+                    else if(type == POSITION_TYPE_SELL)\
+                    \{\
+                        newSL = NormalizeDouble(openPrice - 10 * _Point, digits);\
+                        if(newSL < currentSL || currentSL == 0)\
+                        \{\
+                            if(trade.PositionModify(_Symbol, newSL, currentTP))\
+                            \{\
+                                if(EnableDebug) Print("Breakeven activated for SELL: SL moved to ", newSL);\
+                            \}\
+                        \}\
+                    \}\
+                \}\
+            \}\
+        \}\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Expert tick function - FIXED VERSION                            |\
+//+------------------------------------------------------------------+\
+void OnTick()\
+\{\
+    if(_Symbol != "XAUUSD") \
+    \{\
+        if(EnableDebug) Print("Wrong symbol: ", _Symbol, " - Expected: XAUUSD");\
+        return;\
+    \}\
+\
+    // Reset daily stats\
+    ResetDailyStats();\
+\
+    // Wait for enough bars\
+    int required_bars = MathMax(FastMAPeriod, MathMax(SlowMAPeriod, MathMax(RSIPeriod, MathMax(MACDSlow, ADXPeriod)))) + 5;\
+    if(Bars(_Symbol, PERIOD_M1) < required_bars)\
+    \{\
+        if(EnableDebug) Print("Waiting for more bars... Current: ", Bars(_Symbol, PERIOD_M1), " Required: ", required_bars);\
+        return;\
+    \}\
+\
+    // Check for new M1 bar\
+    datetime currentM1Bar = iTime(_Symbol, PERIOD_M1, 0);\
+    if(currentM1Bar == 0) \
+    \{\
+        if(EnableDebug) Print("Invalid bar time");\
+        return;\
+    \}\
+    \
+    if(currentM1Bar == lastM1BarTime) \
+    \{\
+        ManageScalpingPositions();\
+        return;\
+    \}\
+    \
+    // NEW BAR DETECTED - Update bar time\
+    lastM1BarTime = currentM1Bar;\
+    if(EnableDebug) Print("New M1 bar detected: ", TimeToString(currentM1Bar));\
+    \
+    // FAST position management\
+    ManageScalpingPositions();\
+    \
+    // Check if we can open new position\
+    if(!CanOpenNewPosition()) \
+        return;\
+    \
+    // Calculate ULTRA-FAST scalping signals\
+    bool buySignal = CheckScalpingBuySignal();\
+    bool sellSignal = CheckScalpingSellSignal();\
+    \
+    // Handle buy positions\
+    if(buySignal)\
+    \{\
+        double new_lot = CalculateLotSize();\
+        double sl = 0.0, tp = 0.0;\
+        CalculateSLTP(true, sl, tp, new_lot);\
+        \
+        double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);\
+        \
+        if(trade.Buy(new_lot, _Symbol, ask, sl, tp, "GOLD SCALPING BUY"))\
+        \{\
+            lastTradeTime = TimeCurrent();\
+            totalTradesToday++;\
+            Print("=== SCALPING BUY OPENED ===");\
+            Print("Time: ", TimeToString(TimeCurrent()));\
+            Print("Lot: ", new_lot, " | Price: ", ask);\
+            Print("SL: ", sl, " | TP: ", tp);\
+            Print("Magic: 1007 | Trades Today: ", totalTradesToday);\
+        \}\
+        else\
+        \{\
+            int error = GetLastError();\
+            Print("BUY ORDER FAILED! Error: ", error, " - ", GetLastErrorDescription(error));\
+        \}\
+    \}\
+    \
+    // Handle sell positions\
+    if(sellSignal)\
+    \{\
+        double new_lot = CalculateLotSize();\
+        double sl = 0.0, tp = 0.0;\
+        CalculateSLTP(false, sl, tp, new_lot);\
+        \
+        double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);\
+        \
+        if(trade.Sell(new_lot, _Symbol, bid, sl, tp, "GOLD SCALPING SELL"))\
+        \{\
+            lastTradeTime = TimeCurrent();\
+            totalTradesToday++;\
+            Print("=== SCALPING SELL OPENED ===");\
+            Print("Time: ", TimeToString(TimeCurrent()));\
+            Print("Lot: ", new_lot, " | Price: ", bid);\
+            Print("SL: ", sl, " | TP: ", tp);\
+            Print("Magic: 1007 | Trades Today: ", totalTradesToday);\
+        \}\
+        else\
+        \{\
+            int error = GetLastError();\
+            Print("SELL ORDER FAILED! Error: ", error, " - ", GetLastErrorDescription(error));\
+        \}\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Get error description                                           |\
+//+------------------------------------------------------------------+\
+string GetLastErrorDescription(int error)\
+\{\
+    switch(error)\
+    \{\
+        case 0: return "No error";\
+        case 1: return "No error returned, but result is unknown";\
+        case 2: return "Common error";\
+        case 3: return "Invalid trade parameters";\
+        case 4: return "Trade server is busy";\
+        case 5: return "Old version of the client terminal";\
+        case 6: return "No connection with trade server";\
+        case 7: return "Not enough rights";\
+        case 8: return "Too frequent requests";\
+        case 9: return "Market is closed";\
+        case 64: return "Account disabled";\
+        case 65: return "Invalid account";\
+        case 128: return "Trade timeout";\
+        case 129: return "Invalid price";\
+        case 130: return "Invalid stops";\
+        case 131: return "Invalid trade volume";\
+        case 132: return "Market is closed";\
+        case 133: return "Trade is disabled";\
+        case 134: return "Not enough money";\
+        case 135: return "Price changed";\
+        case 136: return "Off quotes";\
+        case 137: return "Broker is busy";\
+        case 138: return "Requote";\
+        case 139: return "Order is locked";\
+        case 140: return "Long positions only allowed";\
+        case 141: return "Too many requests";\
+        case 145: return "Modification denied because order is too close to market";\
+        case 146: return "Trade context is busy";\
+        case 147: return "Expirations are denied by broker";\
+        case 148: return "Too many open and pending orders";\
+        default: return "Unknown error";\
+    \}\
+\}\
+\
+//+------------------------------------------------------------------+\
+//| Trade function for scalping                                     |\
+//+------------------------------------------------------------------+\
+void OnTrade()\
+\{\
+    double currentProfit = 0;\
+    for(int i = 0; i < PositionsTotal(); i++)\
+    \{\
+        if(positionInfo.SelectByIndex(i))\
+        \{\
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == 1007)\
+            \{\
+                currentProfit += positionInfo.Profit();\
+            \}\
+        \}\
+    \}\
+    \
+    // Check if position was closed\
+    if(lastProfit != 0 && currentProfit == 0)\
+    \{\
+        if(lastProfit < 0)\
+        \{\
+            consecutiveLosses++;\
+            Print("Scalping Loss #", consecutiveLosses, " | P/L: $", lastProfit);\
+        \}\
+        else\
+        \{\
+            consecutiveLosses = 0;\
+            Print("Scalping Profit! | P/L: $", lastProfit);\
+        \}\
+        \
+        if(consecutiveLosses >= MaxConsecutiveLoss)\
+        \{\
+            consecutiveLosses = 0;\
+            currentLotSize = InitialLotSize;\
+            Print("SCALPING STOP: Reset after max consecutive losses");\
+        \}\
+    \}\
+    \
+    lastProfit = currentProfit;\
+\}\
+//+------------------------------------------------------------------+}
